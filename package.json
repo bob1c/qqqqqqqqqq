@@ -1,0 +1,1 @@
+{ "name": "memepulse", "version": "1.0.0", "private": true, "scripts": { "start": "node server.js", "selftest": "node server.js --selftest" }, "engines": { "node": ">=18" } }

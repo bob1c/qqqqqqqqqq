@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MemePulse</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=JetBrains+Mono:wght@400;600&family=Onest:wght@400;500;600&display=swap">
+<style>
+/* Layout: wire-service feed. Sticky status strip on top, filter bar, then a single column of ranked items. */
+:root{
+  --bg:#eef0f2; --panel:#fafbfc; --ink:#14202b; --mute:#5d6b78; --line:#d5dbe0;
+  --hot:#e5421f; --watch:#c58a00; --meh:#6b7a88; --ok:#17835a; --bad:#b3261e;
+  --f-display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
+  --f-body:"Onest","Segoe UI",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f161d; --panel:#16202a; --ink:#e6edf3; --mute:#8d9cab; --line:#26333f;
+  --hot:#ff6a45; --watch:#e3ad2c; --meh:#8d9cab; --ok:#3fc68f; --bad:#ff7b72; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f161d; --panel:#16202a; --ink:#e6edf3; --mute:#8d9cab; --line:#26333f;
+  --hot:#ff6a45; --watch:#e3ad2c; --meh:#8d9cab; --ok:#3fc68f; --bad:#ff7b72; color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);
+  padding-block:0 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:860px;margin:0 auto}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:22px 0 10px}
+h1{font:800 28px/1 var(--f-display);margin:0;letter-spacing:-.02em}
+h1 span{color:var(--hot)}
+.live{font:600 12px var(--f-mono);color:var(--mute);display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--meh)}
+.live.on .dot{background:var(--ok);animation:pulse 1.6s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.sources{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 14px}
+.src{font:400 11.5px var(--f-mono);padding:3px 8px;border:1px solid var(--line);border-radius:4px;color:var(--mute);background:var(--panel)}
+.src.ok{color:var(--ink)} .src.ok::before{content:"● ";color:var(--ok)}
+.src.err::before{content:"● ";color:var(--bad)} .src.off{opacity:.55}.src.off::before{content:"○ "}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-block:1px solid var(--line);margin-bottom:14px;position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);z-index:5}
+.chip{font:600 12.5px var(--f-body);border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 11px;border-radius:999px;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chip:focus-visible,a:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+.sp{flex:1}
+.count{font:400 12px var(--f-mono);color:var(--mute)}
+.feed{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
+.card{display:grid;grid-template-columns:58px minmax(0,1fr) auto;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px}
+.card.new{animation:flash 2.4s ease-out}
+@keyframes flash{0%{box-shadow:0 0 0 2px var(--hot);transform:translateY(-6px)}100%{box-shadow:0 0 0 0 transparent}}
+.rank{font:800 26px/1 var(--f-display);text-align:center;padding-top:2px}
+.rank small{display:block;font:600 10px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;margin-top:6px}
+.t-hot .rank{color:var(--hot)} .t-watch .rank{color:var(--watch)} .t-meh .rank,.t-junk .rank{color:var(--meh)} .t-skip .rank{color:var(--bad)}
+.main{min-width:0}
+.title{font:600 15.5px/1.35 var(--f-body);color:var(--ink);text-decoration:none;overflow-wrap:anywhere}
+.title:hover{text-decoration:underline}
+.meta{display:flex;flex-wrap:wrap;gap:4px 10px;font:400 11.5px var(--f-mono);color:var(--mute);margin-top:5px}
+.tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.tag{font:600 11px var(--f-body);padding:2px 7px;border-radius:4px;background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink)}
+.tag.coin-open{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.tag.coin-taken{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.tag.coin-early,.tag.coin-crowded{background:color-mix(in srgb,var(--watch) 20%,transparent);color:var(--watch)}
+.tag.flag{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.thumb{width:72px;height:72px;object-fit:cover;border-radius:4px;background:var(--line)}
+.empty{padding:40px 0;text-align:center;color:var(--mute)}
+.note{font-size:12.5px;color:var(--mute);margin-top:22px;line-height:1.55}
+@media (max-width:520px){.card{grid-template-columns:48px minmax(0,1fr)}.thumb{display:none}.rank{font-size:22px}}
+@media (prefers-reduced-motion:reduce){.card.new,.live.on .dot{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Meme<span>Pulse</span></h1>
+    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span></div>
+  </header>
+  <div class="sources" id="sources"></div>
+
+  <div class="bar" role="toolbar" aria-label="Фильтры">
+    <button class="chip" data-tier="hot" aria-pressed="true">Hot</button>
+    <button class="chip" data-tier="watch" aria-pressed="true">Watch</button>
+    <button class="chip" data-tier="meh" aria-pressed="false">Meh</button>
+    <button class="chip" data-tier="junk" aria-pressed="false">Мусор</button>
+    <span class="sp"></span>
+    <button class="chip" data-kind="" aria-pressed="true" id="kAll">Всё</button>
+    <button class="chip" data-kind="meme" aria-pressed="false">Мемы</button>
+    <button class="chip" data-kind="news" aria-pressed="false">Новости</button>
+    <button class="chip" data-kind="trend" aria-pressed="false">Тренды</button>
+    <button class="chip" data-kind="coin" aria-pressed="false">Монеты</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <ul class="feed" id="feed"></ul>
+
+  <p class="note">
+    Оценка 0–100: скорость роста относительно своей площадки, «мемность» (животные, сленг, персонажи), новостной повод,
+    упоминание на нескольких платформах, свежесть. Спам и трагедии помечаются и скрыты. Метка монеты показывает, есть ли уже
+    токен с таким тикером в Solana (open: свободно, early: мало копий, crowded: много копий, taken: уже крупный).
+    Это радар внимания, а не финансовая рекомендация: большинство мем-монет теряют стоимость.
+  </p>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { items: [], seen: new Set(), tiers: new Set(['hot', 'watch']), kind: '', first: true };
+const SRC_NAME = { reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
+const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip' };
+
+function ago(ts) {
+  const m = Math.max(0, Math.round((Date.now() - ts) / 60000));
+  return m < 60 ? m + ' мин' : m < 1440 ? Math.round(m / 60) + ' ч' : Math.round(m / 1440) + ' д';
+}
+const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function card(it, isNew) {
+  const li = document.createElement('li');
+  li.className = 'card t-' + it.tier + (isNew ? ' new' : '');
+  const coin = it.coin ? `<span class="tag coin-${it.coin.verdict}">$${esc(it.ticker)}: ${it.coin.verdict}${it.coin.topMcap ? ' · ' + fmt(it.coin.topMcap) + ' mcap' : ''}</span>` : '';
+  const flags = (it.flags || []).map((f) => `<span class="tag flag">${f === 'spam' ? 'спам' : 'чувствительная тема'}</span>`).join('');
+  const reasons = (it.reasons || []).map((r) => `<span class="tag">${esc(r)}</span>`).join('');
+  const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), ago(it.ts) + ' назад']
+    .concat(it.kind === 'coin' && it.extra ? ['mcap ' + fmt(it.extra.mcap), '1h ' + (it.extra.change1h >= 0 ? '+' : '') + it.extra.change1h + '%'] : (it.score ? ['▲ ' + fmt(it.score)] : []))
+    .concat(it.comments && it.kind !== 'coin' ? ['💬 ' + fmt(it.comments)] : []).join(' · ');
+  li.innerHTML = `<div class="rank">${it.rank}<small>${TIER_LABEL[it.tier]}</small></div>
+    <div class="main"><a class="title" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.title)}</a>
+    <div class="meta">${meta}</div><div class="tags">${coin}${reasons}${flags}</div></div>
+    ${it.image ? `<img class="thumb" loading="lazy" alt="" src="${esc(it.image)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}`;
+  return li;
+}
+
+function render() {
+  const feed = $('#feed');
+  const list = state.items.filter((i) => state.tiers.has(i.tier) && (!state.kind || i.kind === state.kind));
+  feed.replaceChildren();
+  if (!list.length) {
+    feed.innerHTML = '<li class="empty">Пока ничего подходящего. Ждём новые данные или включите «Meh».</li>';
+  } else {
+    for (const it of list.slice(0, 120)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && it.tier === 'hot'));
+  }
+  $('#count').textContent = list.length + ' в ленте';
+  for (const i of state.items) state.seen.add(i.id);
+  state.first = false;
+}
+
+function renderStatus(st) {
+  $('#sources').innerHTML = Object.entries(st).map(([k, v]) => {
+    const cls = v.off ? 'off' : v.ok ? 'ok' : 'err';
+    const tip = v.off ? 'не подключён (нужен ключ)' : v.ok ? v.count + ' шт.' : v.error;
+    return `<span class="src ${cls}" title="${esc(tip)}">${SRC_NAME[k] || k}</span>`;
+  }).join('');
+}
+
+document.querySelectorAll('[data-tier]').forEach((b) => b.addEventListener('click', () => {
+  const t = b.dataset.tier; state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
+  b.setAttribute('aria-pressed', state.tiers.has(t)); render();
+}));
+document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('click', () => {
+  state.kind = b.dataset.kind;
+  document.querySelectorAll('[data-kind]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  render();
+}));
+
+function connect() {
+  const es = new EventSource('/events');
+  es.addEventListener('snapshot', (e) => {
+    const d = JSON.parse(e.data);
+    state.items = d.items; renderStatus(d.status); render();
+    $('#live').classList.add('on'); $('#liveTxt').textContent = 'live · ' + new Date().toLocaleTimeString();
+  });
+  es.onerror = () => { $('#live').classList.remove('on'); $('#liveTxt').textContent = 'переподключение…'; };
+}
+connect();
+setInterval(() => { if (state.items.length) render(); }, 60000);
+</script>
+</body>
+</html>

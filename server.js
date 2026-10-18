@@ -1,0 +1,361 @@
+'use strict';
+// MemePulse: real-time meme/news radar for memecoin hunting.
+// Zero dependencies. Node 18+.  Run: node server.js   (then open http://localhost:3000)
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const PORT = Number(process.env.PORT || 3000);
+const UA = 'Mozilla/5.0 (compatible; MemePulse/1.0)';
+const MAX_AGE_H = 36;
+
+const items = new Map();   // id -> item
+const status = {};         // source -> {ok, last, count, error}
+const coinCache = new Map(); // ticker -> {t, data}
+const clients = new Set();
+
+/* ----------------------------- helpers ----------------------------- */
+async function getText(url, headers = {}) {
+  const r = await fetch(url, {
+    headers: { 'User-Agent': UA, Accept: '*/*', ...headers },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.text();
+}
+async function getJSON(url, headers) { return JSON.parse(await getText(url, headers)); }
+const now = () => Date.now();
+const ageH = (ts) => Math.max(0, (now() - ts) / 3600000);
+const clean = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
+
+function upsert(it) {
+  const old = items.get(it.id);
+  items.set(it.id, { ...(old || {}), ...it, firstSeen: old ? old.firstSeen : now() });
+}
+
+/* ----------------------------- sources ----------------------------- */
+// Each source returns an array of {id, source, kind, title, url, image, author, ts, score, comments, extra}
+
+const SUBS = (process.env.SUBREDDITS ||
+  'memes,dankmemes,MemeEconomy,OutOfTheLoop,popular,technology,worldnews').split(',');
+
+async function srcReddit() {
+  const out = [];
+  for (const sub of SUBS) {
+    const j = await getJSON(`https://www.reddit.com/r/${sub}/rising.json?limit=25&raw_json=1`);
+    for (const c of j.data.children) {
+      const d = c.data;
+      if (d.stickied || d.over_18) continue;
+      const img = d.post_hint === 'image' ? d.url : (d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : '');
+      out.push({
+        id: 'rd_' + d.id, source: 'reddit', kind: ['memes', 'dankmemes', 'MemeEconomy'].includes(sub) ? 'meme' : 'news',
+        title: clean(d.title), url: 'https://reddit.com' + d.permalink, image: img, author: 'r/' + sub,
+        ts: d.created_utc * 1000, score: d.score, comments: d.num_comments,
+      });
+    }
+  }
+  return out;
+}
+
+async function srcHN() {
+  const ids = (await getJSON('https://hacker-news.firebaseio.com/v0/topstories.json')).slice(0, 30);
+  const out = [];
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const d = await getJSON(`https://hacker-news.firebaseio.com/v0/item/${id}.json`);
+      if (!d || !d.title) return;
+      out.push({
+        id: 'hn_' + id, source: 'hackernews', kind: 'news', title: clean(d.title),
+        url: d.url || `https://news.ycombinator.com/item?id=${id}`, image: '', author: d.by,
+        ts: d.time * 1000, score: d.score, comments: d.descendants || 0,
+      });
+    } catch (_) { /* skip one item */ }
+  }));
+  return out;
+}
+
+async function srcTrends() {
+  const xml = await getText('https://trends.google.com/trending/rss?geo=' + (process.env.TRENDS_GEO || 'US'));
+  const out = [];
+  for (const m of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
+    const b = m[1];
+    const title = clean((b.match(/<title>([\s\S]*?)<\/title>/) || [])[1]);
+    const traffic = clean((b.match(/<ht:approx_traffic>([\s\S]*?)<\/ht:approx_traffic>/) || [])[1]);
+    const pub = (b.match(/<pubDate>([\s\S]*?)<\/pubDate>/) || [])[1];
+    const news = clean((b.match(/<ht:news_item_title>([\s\S]*?)<\/ht:news_item_title>/) || [])[1]);
+    const link = clean((b.match(/<ht:news_item_url>([\s\S]*?)<\/ht:news_item_url>/) || [])[1]);
+    const n = parseInt(traffic.replace(/[^\d]/g, ''), 10) || 0;
+    if (!title) continue;
+    out.push({
+      id: 'gt_' + title.toLowerCase(), source: 'trends', kind: 'trend',
+      title: news ? `${title}: ${news}` : title, url: link || 'https://trends.google.com/trending?geo=US',
+      image: '', author: traffic ? traffic + ' searches' : 'Google Trends',
+      ts: pub ? Date.parse(pub) : now(), score: n / 100, comments: 0,
+    });
+  }
+  return out;
+}
+
+// Tokens that are already trading right now (what the market is rewarding).
+async function srcGecko() {
+  const j = await getJSON('https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?include=base_token,dex&page=1');
+  const inc = Object.fromEntries((j.included || []).map((x) => [x.type + ':' + x.id, x]));
+  const out = [];
+  for (const p of j.data || []) {
+    const a = p.attributes;
+    const dex = (p.relationships.dex.data || {}).id || '';
+    if (!/pump/i.test(dex)) continue;
+    const base = inc['token:' + (p.relationships.base_token.data || {}).id];
+    const name = (a.name || '').split(' / ')[0];
+    const created = Date.parse(a.pool_created_at);
+    out.push({
+      id: 'gk_' + p.id, source: 'pumpfun', kind: 'coin', title: name,
+      url: 'https://www.geckoterminal.com/solana/pools/' + a.address,
+      image: base && base.attributes ? base.attributes.image_url || '' : '',
+      author: dex, ts: created || now(),
+      score: Number(a.volume_usd && a.volume_usd.h1) / 100 || 0,
+      comments: Number(a.transactions && a.transactions.h1 && a.transactions.h1.buys) || 0,
+      extra: { mcap: Number(a.fdv_usd) || 0, change1h: Number(a.price_change_percentage && a.price_change_percentage.h1) || 0, vol1h: Number(a.volume_usd && a.volume_usd.h1) || 0 },
+    });
+  }
+  return out;
+}
+
+// Fresh token profiles on Solana (projects that just paid for a profile = people are marketing them).
+async function srcDexProfiles() {
+  const j = await getJSON('https://api.dexscreener.com/token-profiles/latest/v1');
+  const out = [];
+  for (const p of j) {
+    if (p.chainId !== 'solana') continue;
+    const title = clean((p.description || '').slice(0, 90)) || p.tokenAddress.slice(0, 6);
+    out.push({
+      id: 'dx_' + p.tokenAddress, source: 'dexscreener', kind: 'coin', title,
+      url: p.url, image: p.icon || '', author: 'new profile', ts: now(), score: 0, comments: (p.links || []).length,
+    });
+  }
+  return out;
+}
+
+// Optional: X (Twitter) recent search. Needs a paid API plan. X_BEARER=... X_QUERY='...'
+async function srcX() {
+  if (!process.env.X_BEARER) return null;
+  const q = encodeURIComponent(process.env.X_QUERY || '(meme OR viral OR "is cooked") -is:retweet lang:en has:images');
+  const j = await getJSON(`https://api.x.com/2/tweets/search/recent?query=${q}&max_results=50&tweet.fields=public_metrics,created_at`,
+    { Authorization: 'Bearer ' + process.env.X_BEARER });
+  return (j.data || []).map((t) => ({
+    id: 'x_' + t.id, source: 'x', kind: 'meme', title: clean(t.text), url: 'https://x.com/i/status/' + t.id,
+    image: '', author: 'X', ts: Date.parse(t.created_at),
+    score: t.public_metrics.like_count + 2 * t.public_metrics.retweet_count, comments: t.public_metrics.reply_count,
+  }));
+}
+
+// Optional: TikTok through an Apify actor. APIFY_TOKEN=... APIFY_TIKTOK_ACTOR=user~actor-name
+// Map the actor's output fields in the function below to match the actor you pick.
+async function srcTikTok() {
+  if (!process.env.APIFY_TOKEN || !process.env.APIFY_TIKTOK_ACTOR) return null;
+  const url = `https://api.apify.com/v2/acts/${process.env.APIFY_TIKTOK_ACTOR}/run-sync-get-dataset-items?token=${process.env.APIFY_TOKEN}`;
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: process.env.APIFY_INPUT || '{}', signal: AbortSignal.timeout(90000) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const rows = await r.json();
+  return rows.slice(0, 60).map((v, i) => ({
+    id: 'tt_' + (v.id || i), source: 'tiktok', kind: 'meme', title: clean(v.text || v.desc || v.title || ''),
+    url: v.webVideoUrl || v.url || 'https://tiktok.com', image: v.covers ? v.covers[0] : '', author: (v.authorMeta && v.authorMeta.name) || 'TikTok',
+    ts: v.createTimeISO ? Date.parse(v.createTimeISO) : now(),
+    score: (v.diggCount || v.likes || 0) / 10, comments: v.commentCount || 0,
+  }));
+}
+
+const SOURCES = [
+  { name: 'reddit', every: 60, run: srcReddit },
+  { name: 'hackernews', every: 120, run: srcHN },
+  { name: 'trends', every: 300, run: srcTrends },
+  { name: 'pumpfun', every: 45, run: srcGecko },
+  { name: 'dexscreener', every: 45, run: srcDexProfiles },
+  { name: 'x', every: 120, run: srcX },
+  { name: 'tiktok', every: 600, run: srcTikTok },
+];
+
+/* ----------------------------- scoring ----------------------------- */
+const MEME_WORDS = ['cat', 'kitten', 'dog', 'puppy', 'frog', 'capybara', 'hamster', 'duck', 'penguin', 'monkey', 'pig', 'goat', 'bear', 'raccoon', 'otter', 'squirrel', 'pepe', 'doge', 'moo', 'bird', 'fish', 'cow', 'baby', 'guy', 'girl', 'man',
+  'rizz', 'skibidi', 'sigma', 'brainrot', 'cooked', 'goated', 'based', 'mid', 'delulu', 'aura', 'npc', 'ratio', 'cringe', 'vibe', 'chill', 'unc', 'huzz', 'gyatt', 'viral', 'meme', 'trend', 'challenge', 'routine', 'wtf', 'lmao', 'lol'];
+const NEWS_HOOKS = ['trump', 'musk', 'elon', 'biden', 'putin', 'zelensky', 'openai', 'chatgpt', 'grok', 'altman', 'nvidia', 'apple', 'tesla', 'bitcoin', 'solana', 'ai', 'robot', 'election', 'tiktok', 'spacex', 'mars', 'nasa', 'ufo', 'alien', 'taylor', 'kanye', 'drake', 'kendrick', 'messi', 'ronaldo', 'ban', 'leak', 'arrested', 'fired', 'record'];
+const SENSITIVE = /\b(dies|died|dead|death|killed|shooting|shot dead|suicide|murder|rape|abuse|funeral|rip|victims?|massacre|terror|attack|crash|tragedy|missing child)\b/i;
+const SPAM = /\b(giveaway|promo code|discount|sponsored|affiliate|subscribe|follow me|dm me|whatsapp|telegram|airdrop|presale|guaranteed)\b/i;
+const STOP = new Set('this that with from have your what when will just they them been were about into over more than then like make made some very much also after before there their which would could should today here only does most other'.split(' '));
+
+const tokens = (s) => (String(s).toLowerCase().match(/[a-z0-9$]{3,}/g) || []).filter((w) => !STOP.has(w));
+
+function percentileMap(list, f) {
+  const sorted = [...list].map(f).sort((a, b) => a - b);
+  return (v) => {
+    if (sorted.length < 2) return 0.5;
+    let lo = 0; while (lo < sorted.length && sorted[lo] < v) lo++;
+    return lo / (sorted.length - 1);
+  };
+}
+
+function suggestTicker(it) {
+  const toks = tokens(it.title);
+  const meme = toks.find((t) => MEME_WORDS.includes(t));
+  const caps = (it.title.match(/\b[A-Z][a-z]{3,}\b/g) || []).map((s) => s.toLowerCase()).find((s) => !STOP.has(s));
+  const longest = [...toks].sort((a, b) => b.length - a.length)[0];
+  const pick = caps || meme || longest || 'meme';
+  return pick.replace(/[^a-z0-9]/g, '').slice(0, 8).toUpperCase();
+}
+
+function rescore() {
+  const live = [...items.values()].filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin');
+  const bySource = {};
+  for (const i of live) (bySource[i.source] ||= []).push(i);
+
+  for (const list of Object.values(bySource)) {
+    const vel = (i) => (i.score + 3 * i.comments) / Math.pow(ageH(i.ts) + 2, 1.2);
+    const pct = percentileMap(list, vel);
+    for (const i of list) i._vel = pct(vel(i));
+  }
+
+  const tokIdx = live.map((i) => ({ i, t: new Set(tokens(i.title)) }));
+  for (const a of tokIdx) {
+    const sources = new Set();
+    for (const b of tokIdx) {
+      if (a.i.source === b.i.source) continue;
+      let shared = 0; for (const w of a.t) if (b.t.has(w)) shared++;
+      if (shared >= 2) sources.add(b.i.source);
+    }
+    a.i.cross = sources.size;
+  }
+
+  for (const it of live) {
+    const toks = tokens(it.title);
+    const reasons = [];
+    let s = it._vel * 55;
+    if (it._vel > 0.85) reasons.push('momentum');
+    const memeHits = toks.filter((t) => MEME_WORDS.includes(t)).length;
+    if (memeHits) { s += Math.min(14, 7 * memeHits); reasons.push('meme-able'); }
+    const newsHits = toks.filter((t) => NEWS_HOOKS.includes(t)).length;
+    if (newsHits) { s += Math.min(12, 6 * newsHits); reasons.push('news hook'); }
+    if (it.cross) { s += Math.min(20, 12 * it.cross); reasons.push('seen on ' + (it.cross + 1) + ' platforms'); }
+    const h = ageH(it.ts);
+    if (h < 3) { s += 8; reasons.push('fresh'); } else if (h > 18) s -= 8;
+    if (it.image) s += 3;
+    if (it.title.length < 8) s -= 25;
+    if (it.title.length > 140) s -= 6;
+    if (it.kind === 'coin') { s = 40 + it._vel * 45; reasons.length = 0; if (it._vel > 0.7) reasons.push('trading hot'); }
+
+    it.flags = [];
+    if (SPAM.test(it.title)) { s -= 60; it.flags.push('spam'); }
+    if (SENSITIVE.test(it.title)) { s -= 60; it.flags.push('sensitive'); }
+    if (it.title === it.title.toUpperCase() && it.title.length > 20) s -= 10;
+
+    it.rank = Math.max(0, Math.min(100, Math.round(s)));
+    it.tier = it.flags.length ? 'skip' : it.rank >= 68 ? 'hot' : it.rank >= 48 ? 'watch' : it.rank >= 30 ? 'meh' : 'junk';
+    it.reasons = reasons;
+    if (it.kind !== 'coin') it.ticker = suggestTicker(it);
+  }
+}
+
+/* --------------------- "is it already a coin?" --------------------- */
+async function coinCheck(ticker) {
+  const c = coinCache.get(ticker);
+  if (c && now() - c.t < 30 * 60000) return c.data;
+  let data = null;
+  try {
+    const j = await getJSON('https://api.dexscreener.com/latest/dex/search?q=' + encodeURIComponent(ticker));
+    const sol = (j.pairs || []).filter((p) => p.chainId === 'solana');
+    const exact = sol.filter((p) => (p.baseToken.symbol || '').toUpperCase() === ticker);
+    const best = exact.sort((a, b) => (b.fdv || 0) - (a.fdv || 0))[0];
+    data = {
+      copies: exact.length,
+      topMcap: best ? best.fdv || 0 : 0,
+      url: best ? best.url : '',
+      verdict: !exact.length ? 'open' : (best.fdv || 0) > 1e6 ? 'taken' : exact.length > 5 ? 'crowded' : 'early',
+    };
+  } catch (_) { data = null; }
+  coinCache.set(ticker, { t: now(), data });
+  return data;
+}
+
+async function enrichTop() {
+  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && (i.tier === 'hot' || i.tier === 'watch') && i.ticker).sort((a, b) => b.rank - a.rank).slice(0, 12);
+  for (const it of cand) {
+    const d = await coinCheck(it.ticker);
+    if (d) it.coin = d;
+    if (it.coin && it.coin.verdict === 'taken') { it.rank = Math.max(0, it.rank - 10); }
+  }
+}
+
+/* ----------------------------- loop & SSE ----------------------------- */
+function view() {
+  return [...items.values()]
+    .filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin')
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, 300)
+    .map(({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra }) =>
+      ({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra }));
+}
+function broadcast() {
+  const msg = `event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`;
+  for (const c of clients) c.write(msg);
+}
+
+function prune() {
+  for (const [id, i] of items) if (ageH(i.ts) > MAX_AGE_H * 2 && i.kind !== 'coin') items.delete(id);
+  for (const [id, i] of items) if (i.kind === 'coin' && ageH(i.firstSeen) > 6) items.delete(id);
+}
+
+async function runSource(src) {
+  try {
+    const rows = await src.run();
+    if (rows === null) { status[src.name] = { ok: false, off: true, error: 'not configured' }; return; }
+    for (const r of rows) upsert(r);
+    status[src.name] = { ok: true, last: now(), count: rows.length };
+  } catch (e) {
+    status[src.name] = { ok: false, last: now(), error: String(e.message || e) };
+  }
+  prune(); rescore(); await enrichTop(); broadcast();
+}
+
+function start() {
+  for (const s of SOURCES) {
+    runSource(s);
+    setInterval(() => runSource(s), s.every * 1000).unref?.();
+  }
+}
+
+/* ----------------------------- http ----------------------------- */
+const server = http.createServer((req, res) => {
+  if (req.url === '/events') {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.write(`event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`);
+    clients.add(res);
+    const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+    req.on('close', () => { clearInterval(ping); clients.delete(res); });
+    return;
+  }
+  if (req.url === '/api/items') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ items: view(), status })); }
+  const file = path.join(__dirname, 'public', req.url === '/' ? 'index.html' : path.normalize(req.url).replace(/^(\.\.[/\\])+/, ''));
+  fs.readFile(file, (err, buf) => {
+    if (err) { res.writeHead(404); return res.end('not found'); }
+    res.writeHead(200, { 'Content-Type': file.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain' });
+    res.end(buf);
+  });
+});
+
+/* ----------------------------- self test ----------------------------- */
+if (process.argv.includes('--selftest')) {
+  const t = now();
+  const mk = (id, source, title, score, comments, hrs) => upsert({ id, source, kind: 'meme', title, url: '#', image: '', author: 'x', ts: t - hrs * 3600000, score, comments });
+  mk('a', 'reddit', 'Capybara in a tiny hat refuses to leave the hot tub', 24000, 900, 2);
+  mk('b', 'reddit', 'Mildly interesting rock', 12, 1, 5);
+  mk('c', 'reddit', 'FREE GIVEAWAY follow me on telegram airdrop', 3000, 5, 1);
+  mk('d', 'reddit', 'Man dies in tragic crash, family mourns', 9000, 800, 1);
+  mk('e', 'hackernews', 'Musk says Grok will ship a robot capybara', 800, 400, 2);
+  mk('f', 'trends', 'Capybara hot tub: viral video trends', 2000, 0, 1);
+  mk('g', 'reddit', 'Chill guy meme gets a sequel', 500, 80, 1);
+  rescore();
+  for (const i of [...items.values()].sort((a, b) => b.rank - a.rank)) console.log(String(i.rank).padStart(3), i.tier.padEnd(6), i.ticker || '', '|', i.title, '|', i.reasons.join(', '), i.flags.join(','));
+  process.exit(0);
+}
+
+server.listen(PORT, () => { console.log('MemePulse on http://localhost:' + PORT); start(); });
