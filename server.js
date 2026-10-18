@@ -170,8 +170,6 @@ const SOURCES = [
   { name: 'reddit', every: 60, run: srcReddit },
   { name: 'hackernews', every: 120, run: srcHN },
   { name: 'trends', every: 300, run: srcTrends },
-  { name: 'pumpfun', every: 45, run: srcGecko },
-  { name: 'dexscreener', every: 45, run: srcDexProfiles },
   { name: 'x', every: 120, run: srcX },
   { name: 'tiktok', every: 600, run: srcTikTok },
 ];
