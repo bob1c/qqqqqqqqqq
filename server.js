@@ -1,20 +1,20 @@
 'use strict';
 // MemePulse: real-time meme/news radar for memecoin hunting.
 // Zero dependencies. Node 18+.  Run: node server.js   (then open http://localhost:3000)
-
+ 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-
+ 
 const PORT = Number(process.env.PORT || 3000);
 const UA = 'Mozilla/5.0 (compatible; MemePulse/1.0)';
 const MAX_AGE_H = 36;
-
+ 
 const items = new Map();   // id -> item
 const status = {};         // source -> {ok, last, count, error}
 const coinCache = new Map(); // ticker -> {t, data}
 const clients = new Set();
-
+ 
 /* ----------------------------- helpers ----------------------------- */
 async function getText(url, headers = {}) {
   const r = await fetch(url, {
@@ -28,18 +28,18 @@ async function getJSON(url, headers) { return JSON.parse(await getText(url, head
 const now = () => Date.now();
 const ageH = (ts) => Math.max(0, (now() - ts) / 3600000);
 const clean = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
-
+ 
 function upsert(it) {
   const old = items.get(it.id);
   items.set(it.id, { ...(old || {}), ...it, firstSeen: old ? old.firstSeen : now() });
 }
-
+ 
 /* ----------------------------- sources ----------------------------- */
 // Each source returns an array of {id, source, kind, title, url, image, author, ts, score, comments, extra}
-
+ 
 const SUBS = (process.env.SUBREDDITS ||
   'memes,dankmemes,MemeEconomy,OutOfTheLoop,popular,technology,worldnews').split(',');
-
+ 
 async function srcReddit() {
   const out = [];
   for (const sub of SUBS) {
@@ -57,7 +57,7 @@ async function srcReddit() {
   }
   return out;
 }
-
+ 
 async function srcHN() {
   const ids = (await getJSON('https://hacker-news.firebaseio.com/v0/topstories.json')).slice(0, 30);
   const out = [];
@@ -74,7 +74,7 @@ async function srcHN() {
   }));
   return out;
 }
-
+ 
 async function srcTrends() {
   const xml = await getText('https://trends.google.com/trending/rss?geo=' + (process.env.TRENDS_GEO || 'US'));
   const out = [];
@@ -96,7 +96,7 @@ async function srcTrends() {
   }
   return out;
 }
-
+ 
 // Tokens that are already trading right now (what the market is rewarding).
 async function srcGecko() {
   const j = await getJSON('https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?include=base_token,dex&page=1');
@@ -121,7 +121,7 @@ async function srcGecko() {
   }
   return out;
 }
-
+ 
 // Fresh token profiles on Solana (projects that just paid for a profile = people are marketing them).
 async function srcDexProfiles() {
   const j = await getJSON('https://api.dexscreener.com/token-profiles/latest/v1');
@@ -136,7 +136,7 @@ async function srcDexProfiles() {
   }
   return out;
 }
-
+ 
 // Optional: X (Twitter) recent search. Needs a paid API plan. X_BEARER=... X_QUERY='...'
 async function srcX() {
   if (!process.env.X_BEARER) return null;
@@ -149,7 +149,7 @@ async function srcX() {
     score: t.public_metrics.like_count + 2 * t.public_metrics.retweet_count, comments: t.public_metrics.reply_count,
   }));
 }
-
+ 
 // Optional: TikTok through an Apify actor. APIFY_TOKEN=... APIFY_TIKTOK_ACTOR=user~actor-name
 // Map the actor's output fields in the function below to match the actor you pick.
 async function srcTikTok() {
@@ -165,7 +165,7 @@ async function srcTikTok() {
     score: (v.diggCount || v.likes || 0) / 10, comments: v.commentCount || 0,
   }));
 }
-
+ 
 const SOURCES = [
   { name: 'reddit', every: 60, run: srcReddit },
   { name: 'hackernews', every: 120, run: srcHN },
@@ -175,7 +175,7 @@ const SOURCES = [
   { name: 'x', every: 120, run: srcX },
   { name: 'tiktok', every: 600, run: srcTikTok },
 ];
-
+ 
 /* ----------------------------- scoring ----------------------------- */
 const MEME_WORDS = ['cat', 'kitten', 'dog', 'puppy', 'frog', 'capybara', 'hamster', 'duck', 'penguin', 'monkey', 'pig', 'goat', 'bear', 'raccoon', 'otter', 'squirrel', 'pepe', 'doge', 'moo', 'bird', 'fish', 'cow', 'baby', 'guy', 'girl', 'man',
   'rizz', 'skibidi', 'sigma', 'brainrot', 'cooked', 'goated', 'based', 'mid', 'delulu', 'aura', 'npc', 'ratio', 'cringe', 'vibe', 'chill', 'unc', 'huzz', 'gyatt', 'viral', 'meme', 'trend', 'challenge', 'routine', 'wtf', 'lmao', 'lol'];
@@ -183,9 +183,9 @@ const NEWS_HOOKS = ['trump', 'musk', 'elon', 'biden', 'putin', 'zelensky', 'open
 const SENSITIVE = /\b(dies|died|dead|death|killed|shooting|shot dead|suicide|murder|rape|abuse|funeral|rip|victims?|massacre|terror|attack|crash|tragedy|missing child)\b/i;
 const SPAM = /\b(giveaway|promo code|discount|sponsored|affiliate|subscribe|follow me|dm me|whatsapp|telegram|airdrop|presale|guaranteed)\b/i;
 const STOP = new Set('this that with from have your what when will just they them been were about into over more than then like make made some very much also after before there their which would could should today here only does most other'.split(' '));
-
+ 
 const tokens = (s) => (String(s).toLowerCase().match(/[a-z0-9$]{3,}/g) || []).filter((w) => !STOP.has(w));
-
+ 
 function percentileMap(list, f) {
   const sorted = [...list].map(f).sort((a, b) => a - b);
   return (v) => {
@@ -194,7 +194,7 @@ function percentileMap(list, f) {
     return lo / (sorted.length - 1);
   };
 }
-
+ 
 function suggestTicker(it) {
   const toks = tokens(it.title);
   const meme = toks.find((t) => MEME_WORDS.includes(t));
@@ -203,18 +203,18 @@ function suggestTicker(it) {
   const pick = caps || meme || longest || 'meme';
   return pick.replace(/[^a-z0-9]/g, '').slice(0, 8).toUpperCase();
 }
-
+ 
 function rescore() {
   const live = [...items.values()].filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin');
   const bySource = {};
   for (const i of live) (bySource[i.source] ||= []).push(i);
-
+ 
   for (const list of Object.values(bySource)) {
     const vel = (i) => (i.score + 3 * i.comments) / Math.pow(ageH(i.ts) + 2, 1.2);
     const pct = percentileMap(list, vel);
     for (const i of list) i._vel = pct(vel(i));
   }
-
+ 
   const tokIdx = live.map((i) => ({ i, t: new Set(tokens(i.title)) }));
   for (const a of tokIdx) {
     const sources = new Set();
@@ -225,7 +225,7 @@ function rescore() {
     }
     a.i.cross = sources.size;
   }
-
+ 
   for (const it of live) {
     const toks = tokens(it.title);
     const reasons = [];
@@ -242,19 +242,21 @@ function rescore() {
     if (it.title.length < 8) s -= 25;
     if (it.title.length > 140) s -= 6;
     if (it.kind === 'coin') { s = 40 + it._vel * 45; reasons.length = 0; if (it._vel > 0.7) reasons.push('trading hot'); }
-
+ 
     it.flags = [];
     if (SPAM.test(it.title)) { s -= 60; it.flags.push('spam'); }
     if (SENSITIVE.test(it.title)) { s -= 60; it.flags.push('sensitive'); }
     if (it.title === it.title.toUpperCase() && it.title.length > 20) s -= 10;
-
+ 
     it.rank = Math.max(0, Math.min(100, Math.round(s)));
     it.tier = it.flags.length ? 'skip' : it.rank >= 68 ? 'hot' : it.rank >= 48 ? 'watch' : it.rank >= 30 ? 'meh' : 'junk';
     it.reasons = reasons;
     if (it.kind !== 'coin') it.ticker = suggestTicker(it);
+    // Already has a coin on Solana -> not an opportunity any more, move out of the main feed.
+    if (it.kind !== 'coin' && it.coin && (it.coin.verdict === 'taken' || it.coin.verdict === 'crowded')) it.tier = 'taken';
   }
 }
-
+ 
 /* --------------------- "is it already a coin?" --------------------- */
 async function coinCheck(ticker) {
   const c = coinCache.get(ticker);
@@ -269,22 +271,23 @@ async function coinCheck(ticker) {
       copies: exact.length,
       topMcap: best ? best.fdv || 0 : 0,
       url: best ? best.url : '',
-      verdict: !exact.length ? 'open' : (best.fdv || 0) > 1e6 ? 'taken' : exact.length > 5 ? 'crowded' : 'early',
+      verdict: !exact.length ? 'open' : (best.fdv || 0) > 300000 ? 'taken' : exact.length > 5 ? 'crowded' : 'early',
     };
   } catch (_) { data = null; }
   coinCache.set(ticker, { t: now(), data });
   return data;
 }
-
+ 
 async function enrichTop() {
-  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && (i.tier === 'hot' || i.tier === 'watch') && i.ticker).sort((a, b) => b.rank - a.rank).slice(0, 12);
+  // Check the best candidates (hot, watch, and already-flagged ones so they can come back if the coin dies).
+  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && i.ticker && !i.flags.length && (i.rank >= 40 || i.tier === 'taken')).sort((a, b) => b.rank - a.rank).slice(0, 30);
   for (const it of cand) {
     const d = await coinCheck(it.ticker);
     if (d) it.coin = d;
-    if (it.coin && it.coin.verdict === 'taken') { it.rank = Math.max(0, it.rank - 10); }
   }
+  rescore();
 }
-
+ 
 /* ----------------------------- loop & SSE ----------------------------- */
 function view() {
   return [...items.values()]
@@ -298,12 +301,12 @@ function broadcast() {
   const msg = `event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`;
   for (const c of clients) c.write(msg);
 }
-
+ 
 function prune() {
   for (const [id, i] of items) if (ageH(i.ts) > MAX_AGE_H * 2 && i.kind !== 'coin') items.delete(id);
   for (const [id, i] of items) if (i.kind === 'coin' && ageH(i.firstSeen) > 6) items.delete(id);
 }
-
+ 
 async function runSource(src) {
   try {
     const rows = await src.run();
@@ -315,14 +318,14 @@ async function runSource(src) {
   }
   prune(); rescore(); await enrichTop(); broadcast();
 }
-
+ 
 function start() {
   for (const s of SOURCES) {
     runSource(s);
     setInterval(() => runSource(s), s.every * 1000).unref?.();
   }
 }
-
+ 
 /* ----------------------------- http ----------------------------- */
 const server = http.createServer((req, res) => {
   if (req.url === '/events') {
@@ -334,14 +337,20 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.url === '/api/items') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ items: view(), status })); }
-  const file = path.join(__dirname, 'public', req.url === '/' ? 'index.html' : path.normalize(req.url).replace(/^(\.\.[/\\])+/, ''));
-  fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404); return res.end('not found'); }
-    res.writeHead(200, { 'Content-Type': file.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain' });
-    res.end(buf);
-  });
+  // Serve index.html from ./public or, if it was uploaded next to server.js, from the project root.
+  const name = req.url.split('?')[0] === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
+  const tryFiles = [path.join(__dirname, 'public', name), path.join(__dirname, name)];
+  const send = (i) => {
+    if (i >= tryFiles.length || !name.endsWith('.html')) { res.writeHead(404); return res.end('not found'); }
+    fs.readFile(tryFiles[i], (err, buf) => {
+      if (err) return send(i + 1);
+      res.writeHead(200, { 'Content-Type': name.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain' });
+      res.end(buf);
+    });
+  };
+  send(0);
 });
-
+ 
 /* ----------------------------- self test ----------------------------- */
 if (process.argv.includes('--selftest')) {
   const t = now();
@@ -357,5 +366,6 @@ if (process.argv.includes('--selftest')) {
   for (const i of [...items.values()].sort((a, b) => b.rank - a.rank)) console.log(String(i.rank).padStart(3), i.tier.padEnd(6), i.ticker || '', '|', i.title, '|', i.reasons.join(', '), i.flags.join(','));
   process.exit(0);
 }
-
+ 
 server.listen(PORT, () => { console.log('MemePulse on http://localhost:' + PORT); start(); });
+ 
