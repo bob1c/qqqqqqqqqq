@@ -47,7 +47,7 @@ h1 span{color:var(--hot)}
 @keyframes flash{0%{box-shadow:0 0 0 2px var(--hot);transform:translateY(-6px)}100%{box-shadow:0 0 0 0 transparent}}
 .rank{font:800 26px/1 var(--f-display);text-align:center;padding-top:2px}
 .rank small{display:block;font:600 10px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;margin-top:6px}
-.t-hot .rank{color:var(--hot)} .t-watch .rank{color:var(--watch)} .t-meh .rank,.t-junk .rank{color:var(--meh)} .t-skip .rank{color:var(--bad)}
+.t-hot .rank{color:var(--hot)} .t-watch .rank{color:var(--watch)} .t-meh .rank,.t-junk .rank,.t-taken .rank{color:var(--meh)} .t-skip .rank{color:var(--bad)}
 .main{min-width:0}
 .title{font:600 15.5px/1.35 var(--f-body);color:var(--ink);text-decoration:none;overflow-wrap:anywhere}
 .title:hover{text-decoration:underline}
@@ -72,48 +72,50 @@ h1 span{color:var(--hot)}
     <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span></div>
   </header>
   <div class="sources" id="sources"></div>
-
+ 
   <div class="bar" role="toolbar" aria-label="Фильтры">
     <button class="chip" data-tier="hot" aria-pressed="true">Hot</button>
     <button class="chip" data-tier="watch" aria-pressed="true">Watch</button>
     <button class="chip" data-tier="meh" aria-pressed="false">Meh</button>
     <button class="chip" data-tier="junk" aria-pressed="false">Мусор</button>
+    <button class="chip" data-tier="taken" aria-pressed="false">Монета уже есть</button>
     <span class="sp"></span>
     <button class="chip" data-kind="" aria-pressed="true" id="kAll">Всё</button>
     <button class="chip" data-kind="meme" aria-pressed="false">Мемы</button>
     <button class="chip" data-kind="news" aria-pressed="false">Новости</button>
     <button class="chip" data-kind="trend" aria-pressed="false">Тренды</button>
-    <button class="chip" data-kind="coin" aria-pressed="false">Монеты</button>
     <span class="count" id="count"></span>
   </div>
-
+ 
   <ul class="feed" id="feed"></ul>
-
+ 
   <p class="note">
     Оценка 0–100: скорость роста относительно своей площадки, «мемность» (животные, сленг, персонажи), новостной повод,
-    упоминание на нескольких платформах, свежесть. Спам и трагедии помечаются и скрыты. Метка монеты показывает, есть ли уже
-    токен с таким тикером в Solana (open: свободно, early: мало копий, crowded: много копий, taken: уже крупный).
+    упоминание на нескольких платформах, свежесть. Спам и трагедии помечаются и скрыты. Для лучших постов проверяется, есть ли уже
+    токен с таким тикером в Solana. Если монета уже есть, пост уходит из ленты во вкладку «Монета уже есть». Тикер сайт
+    придумывает сам, поэтому у мема может быть монета под другим названием: перед запуском проверьте вручную на DexScreener.
     Это радар внимания, а не финансовая рекомендация: большинство мем-монет теряют стоимость.
   </p>
 </div>
-
+ 
 <script>
 const $ = (s) => document.querySelector(s);
 const state = { items: [], seen: new Set(), tiers: new Set(['hot', 'watch']), kind: '', first: true };
 const SRC_NAME = { reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
-const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip' };
-
+const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip', taken: 'занято' };
+const VERDICT = { open: 'монеты нет', early: 'монет мало', crowded: 'много копий', taken: 'монета уже есть' };
+ 
 function ago(ts) {
   const m = Math.max(0, Math.round((Date.now() - ts) / 60000));
   return m < 60 ? m + ' мин' : m < 1440 ? Math.round(m / 60) + ' ч' : Math.round(m / 1440) + ' д';
 }
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
+ 
 function card(it, isNew) {
   const li = document.createElement('li');
   li.className = 'card t-' + it.tier + (isNew ? ' new' : '');
-  const coin = it.coin ? `<span class="tag coin-${it.coin.verdict}">$${esc(it.ticker)}: ${it.coin.verdict}${it.coin.topMcap ? ' · ' + fmt(it.coin.topMcap) + ' mcap' : ''}</span>` : '';
+  const coin = it.coin ? `<span class="tag coin-${it.coin.verdict}">$${esc(it.ticker)}: ${VERDICT[it.coin.verdict] || it.coin.verdict}${it.coin.topMcap ? ' · ' + fmt(it.coin.topMcap) + ' mcap' : ''}</span>` : '';
   const flags = (it.flags || []).map((f) => `<span class="tag flag">${f === 'spam' ? 'спам' : 'чувствительная тема'}</span>`).join('');
   const reasons = (it.reasons || []).map((r) => `<span class="tag">${esc(r)}</span>`).join('');
   const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), ago(it.ts) + ' назад']
@@ -125,10 +127,11 @@ function card(it, isNew) {
     ${it.image ? `<img class="thumb" loading="lazy" alt="" src="${esc(it.image)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}`;
   return li;
 }
-
+ 
 function render() {
   const feed = $('#feed');
-  const list = state.items.filter((i) => state.tiers.has(i.tier) && (!state.kind || i.kind === state.kind));
+  // Main feed: only memes/news/trends. Coins that already trade live on their own tab.
+  const list = state.items.filter((i) => state.kind === 'coin' ? i.kind === 'coin' : (state.tiers.has(i.tier) && i.kind !== 'coin' && (!state.kind || i.kind === state.kind)));
   feed.replaceChildren();
   if (!list.length) {
     feed.innerHTML = '<li class="empty">Пока ничего подходящего. Ждём новые данные или включите «Meh».</li>';
@@ -139,7 +142,7 @@ function render() {
   for (const i of state.items) state.seen.add(i.id);
   state.first = false;
 }
-
+ 
 function renderStatus(st) {
   $('#sources').innerHTML = Object.entries(st).map(([k, v]) => {
     const cls = v.off ? 'off' : v.ok ? 'ok' : 'err';
@@ -147,7 +150,7 @@ function renderStatus(st) {
     return `<span class="src ${cls}" title="${esc(tip)}">${SRC_NAME[k] || k}</span>`;
   }).join('');
 }
-
+ 
 document.querySelectorAll('[data-tier]').forEach((b) => b.addEventListener('click', () => {
   const t = b.dataset.tier; state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
   b.setAttribute('aria-pressed', state.tiers.has(t)); render();
@@ -157,7 +160,7 @@ document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('clic
   document.querySelectorAll('[data-kind]').forEach((x) => x.setAttribute('aria-pressed', x === b));
   render();
 }));
-
+ 
 function connect() {
   const es = new EventSource('/events');
   es.addEventListener('snapshot', (e) => {
