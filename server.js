@@ -51,7 +51,9 @@ function growth(it) {
 // Each source returns an array of {id, source, kind, title, url, image, author, ts, score, comments, extra}
  
 const SUBS = (process.env.SUBREDDITS ||
-  'memes,dankmemes,MemeEconomy,OutOfTheLoop,popular,technology,worldnews').split(',');
+  'all,popular,memes,dankmemes,MemeEconomy,wholesomememes,me_irl,OutOfTheLoop,worldnews,news,technology,todayilearned,interestingasfuck,nextfuckinglevel,Cryptocurrency,solana').split(',');
+const MEME_SUBS = new Set(['memes', 'dankmemes', 'MemeEconomy', 'wholesomememes', 'me_irl', 'interestingasfuck', 'nextfuckinglevel']);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  
 // Reddit often blocks datacenter IPs on one host but not another, so try several routes per subreddit.
 async function redditSub(sub) {
@@ -88,6 +90,7 @@ async function srcReddit() {
   const out = [];
   let fails = 0, lastErr;
   for (const sub of SUBS) {
+    await sleep(250);
     let children;
     try { children = await redditSub(sub); } catch (e) { fails++; lastErr = e; continue; }
     for (const c of children) {
@@ -95,7 +98,7 @@ async function srcReddit() {
       if (d.stickied || d.over_18) continue;
       const img = d.post_hint === 'image' ? d.url : (d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : '');
       out.push({
-        id: 'rd_' + d.id, source: 'reddit', kind: ['memes', 'dankmemes', 'MemeEconomy'].includes(sub) ? 'meme' : 'news',
+        id: 'rd_' + d.id, source: 'reddit', kind: MEME_SUBS.has(sub) ? 'meme' : 'news',
         title: clean(d.title), url: 'https://reddit.com' + d.permalink, image: img, author: 'r/' + sub,
         ts: d.created_utc * 1000, score: d.score, comments: d.num_comments,
       });
@@ -263,12 +266,80 @@ async function srcTikTok() {
   }));
 }
  
+ 
+/* ---------- RSS / Atom news feeds (no keys). Each feed shows as its own chip, so dead ones are visible. ---------- */
+const FEEDS = [
+  ['BBC', 'https://feeds.bbci.co.uk/news/world/rss.xml', 'news'],
+  ['BBC Tech', 'https://feeds.bbci.co.uk/news/technology/rss.xml', 'news'],
+  ['Al Jazeera', 'https://www.aljazeera.com/xml/rss/all.xml', 'news'],
+  ['Guardian', 'https://www.theguardian.com/world/rss', 'news'],
+  ['NYT', 'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml', 'news'],
+  ['CNN', 'http://rss.cnn.com/rss/edition.rss', 'news'],
+  ['NPR', 'https://feeds.npr.org/1001/rss.xml', 'news'],
+  ['Google News', 'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en', 'news'],
+  ['TechCrunch', 'https://techcrunch.com/feed/', 'news'],
+  ['The Verge', 'https://www.theverge.com/rss/index.xml', 'news'],
+  ['Ars Technica', 'https://feeds.arstechnica.com/arstechnica/index', 'news'],
+  ['Wired', 'https://www.wired.com/feed/rss', 'news'],
+  ['Engadget', 'https://www.engadget.com/rss.xml', 'news'],
+  ['Variety', 'https://variety.com/feed/', 'news'],
+  ['ESPN', 'https://www.espn.com/espn/rss/news', 'news'],
+  ['Know Your Meme', 'https://knowyourmeme.com/newsfeed.rss', 'meme'],
+  ['CoinDesk', 'https://www.coindesk.com/arc/outboundfeeds/rss/', 'news'],
+  ['Cointelegraph', 'https://cointelegraph.com/rss', 'news'],
+  ['Decrypt', 'https://decrypt.co/feed', 'news'],
+];
+const tag = (b, name) => { const m = b.match(new RegExp('<' + name + '[^>]*>([\\s\\S]*?)</' + name + '>', 'i')); return m ? m[1] : ''; };
+const unCdata = (s) => String(s || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
+const plain = (s) => clean(unCdata(s).replace(/<[^>]+>/g, ' ').replace(/&lt;[^&]*&gt;/g, ' ').replace(/&nbsp;/g, ' '));
+ 
+function parseFeed(xml, name, kind) {
+  const out = [];
+  const blocks = [...xml.matchAll(/<(item|entry)[\s>]([\s\S]*?)<\/\1>/gi)].map((m) => m[2]);
+  blocks.slice(0, 40).forEach((b, pos) => {
+    const title = plain(tag(b, 'title'));
+    let link = plain(tag(b, 'link')) || (b.match(/<link[^>]*href="([^"]+)"/i) || [])[1] || '';
+    if (!link) link = plain(tag(b, 'guid'));
+    const date = plain(tag(b, 'pubDate')) || plain(tag(b, 'published')) || plain(tag(b, 'updated')) || plain(tag(b, 'dc:date'));
+    let ts = Date.parse(date);
+    if (!ts || ts > now() + 3600000) ts = now();
+    const img = (b.match(/<media:(?:content|thumbnail)[^>]*url="([^"]+)"/i) || b.match(/<enclosure[^>]*url="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i) || b.match(/<img[^>]*src="([^"]+)"/i) || [])[1] || '';
+    if (!title || !link) return;
+    // RSS has no votes. Items higher in a feed are the outlet's own top stories, so use position as a weak score.
+    out.push({ id: 'rss_' + link, source: name, kind, title, url: link, image: img, author: name, ts, score: Math.max(5, 120 - pos * 4), comments: 0 });
+  });
+  return out;
+}
+ 
+// Wikipedia's most-read articles of the last full day: a good "what are people searching" signal. No key.
+async function srcWiki() {
+  let j, lastErr;
+  for (let back = 1; back <= 3 && !j; back++) {
+    const d = new Date(now() - back * 86400000);
+    const u = `https://wikimedia.org/api/rest_v1/metrics/pageviews/top/en.wikipedia/all-access/${d.getUTCFullYear()}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}`;
+    try { j = await getJSON(u); } catch (e) { lastErr = e; }
+  }
+  if (!j) throw lastErr || new Error('no data');
+  const out = [];
+  for (const a of j.items[0].articles) {
+    if (/^(Main_Page|Special:|Wikipedia:|Portal:|Help:|File:|Category:|Talk:|-$)/.test(a.article)) continue;
+    const id = 'wp_' + a.article;
+    const old = items.get(id);
+    out.push({ id, source: 'wikipedia', kind: 'trend', title: a.article.replace(/_/g, ' '), url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(a.article),
+      image: '', author: fmtN(a.views) + ' просмотров вчера', ts: old ? old.ts : now(), score: a.views / 1000, comments: 0 });
+    if (out.length >= 40) break;
+  }
+  return out;
+}
+ 
 const SOURCES = [
-  { name: 'reddit', every: 60, run: srcReddit },
-  { name: 'hackernews', every: 120, run: srcHN },
-  { name: 'trends', every: 300, run: srcTrends },
-  { name: 'mastodon', every: 120, run: srcMastodon },
-  { name: 'bluesky', every: 90, run: srcBluesky },
+  { name: 'reddit', every: 90, run: srcReddit },
+  { name: 'hackernews', every: 45, run: srcHN },
+  { name: 'trends', every: 180, run: srcTrends },
+  { name: 'mastodon', every: 60, run: srcMastodon },
+  { name: 'bluesky', every: 30, run: srcBluesky },
+  { name: 'wikipedia', every: 3600, run: srcWiki },
+  ...FEEDS.map(([name, url, kind]) => ({ name, every: 60, run: async () => parseFeed(await getText(url, { Accept: 'application/rss+xml, application/xml, text/xml, */*' }), name, kind) })),
   { name: 'x', every: 120, run: srcX },
   { name: 'tiktok', every: 600, run: srcTikTok },
 ];
@@ -312,16 +383,22 @@ function rescore() {
     for (const i of list) i._vel = pct(vel(i));
   }
  
-  const tokIdx = live.map((i) => ({ i, t: new Set(tokens(i.title)) }));
-  for (const a of tokIdx) {
-    const sources = new Set();
-    for (const b of tokIdx) {
-      if (a.i.source === b.i.source) continue;
-      let shared = 0; for (const w of a.t) if (b.t.has(w)) shared++;
-      if (shared >= 2) sources.add(b.i.source);
+  // Same story on several different sources = it is spreading. Inverted index keeps this fast with thousands of items.
+  const toks = live.map((i) => [...new Set(tokens(i.title))]);
+  const post = new Map();
+  toks.forEach((ts, idx) => ts.forEach((w) => { if (!post.has(w)) post.set(w, []); post.get(w).push(idx); }));
+  live.forEach((a, ai) => {
+    const counts = new Map();
+    for (const w of toks[ai]) {
+      const list = post.get(w);
+      if (list.length > 60) continue; // too common to mean anything
+      for (const bi of list) if (bi !== ai && live[bi].source !== a.source) counts.set(bi, (counts.get(bi) || 0) + 1);
     }
-    a.i.cross = sources.size;
-  }
+    const need = toks[ai].length <= 4 ? 2 : 3;
+    const sources = new Set();
+    for (const [bi, c] of counts) if (c >= need) sources.add(live[bi].source);
+    a.cross = sources.size;
+  });
  
   for (const it of live) {
     const toks = tokens(it.title);
@@ -401,51 +478,77 @@ async function enrichTop() {
 function view() {
   return [...items.values()]
     .filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin')
-    .sort((a, b) => b.rank - a.rank)
-    .slice(0, 600)
+    .sort((a, b) => (b.risingAt ? 1 : 0) - (a.risingAt ? 1 : 0) || b.ts - a.ts)
+    .slice(0, 800)
     .map(({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }) =>
       ({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }));
 }
+let version = 1;
 function broadcast() {
-  const msg = `event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`;
+  version++;
+  if (!clients.size) return;
+  const msg = `event: snapshot\ndata: ${JSON.stringify({ version, items: view(), status })}\n\n`;
   for (const c of clients) c.write(msg);
 }
  
 function prune() {
   for (const [id, i] of items) if (ageH(i.ts) > MAX_AGE_H * 2 && i.kind !== 'coin') items.delete(id);
   for (const [id, i] of items) if (i.kind === 'coin' && ageH(i.firstSeen) > 6) items.delete(id);
+  if (items.size > 4000) {
+    const old = [...items.entries()].filter(([, i]) => !i.risingAt).sort((a, b) => a[1].ts - b[1].ts).slice(0, items.size - 3500);
+    for (const [id] of old) items.delete(id);
+  }
+}
+ 
+// Many sources finish within seconds of each other. Rescore once for the whole batch, not once per source.
+let pending = false, working = false;
+function schedule() {
+  if (pending) return;
+  pending = true;
+  setTimeout(async () => {
+    pending = false;
+    if (working) return schedule();
+    working = true;
+    try { prune(); rescore(); broadcast(); await enrichTop(); broadcast(); } catch (e) { console.error('update failed', e); }
+    working = false;
+  }, 1500);
 }
  
 async function runSource(src) {
   try {
     const rows = await src.run();
-    if (rows === null) { status[src.name] = { ok: false, off: true, error: 'not configured' }; return; }
+    if (rows === null) { status[src.name] = { ok: false, off: true, error: 'not configured' }; return schedule(); }
     for (const r of rows) upsert(r);
     status[src.name] = { ok: true, last: now(), count: rows.length };
   } catch (e) {
     status[src.name] = { ok: false, last: now(), error: String(e.message || e) };
   }
-  prune(); rescore(); await enrichTop(); broadcast();
+  schedule();
 }
  
 function start() {
-  for (const s of SOURCES) {
-    runSource(s);
-    setInterval(() => runSource(s), s.every * 1000).unref?.();
-  }
+  SOURCES.forEach((s, i) => {
+    // Stagger the first requests so we don't hit every site in the same second.
+    setTimeout(() => { runSource(s); setInterval(() => runSource(s), s.every * 1000).unref?.(); }, i * 400);
+  });
 }
  
 /* ----------------------------- http ----------------------------- */
 const server = http.createServer((req, res) => {
   if (req.url === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    res.write(`event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`);
+    res.write(`event: snapshot\ndata: ${JSON.stringify({ version, items: view(), status })}\n\n`);
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);
     req.on('close', () => { clearInterval(ping); clients.delete(res); });
     return;
   }
-  if (req.url.split('?')[0] === '/api/items') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end(JSON.stringify({ items: view(), status })); }
+  if (req.url.split('?')[0] === '/api/items') {
+    const v = Number((new URL(req.url, 'http://x').searchParams.get('v')) || 0);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    if (v === version) return res.end(JSON.stringify({ version, unchanged: true }));
+    return res.end(JSON.stringify({ version, items: view(), status }));
+  }
   // Serve index.html from ./public or, if it was uploaded next to server.js, from the project root.
   const name = req.url.split('?')[0] === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
   const tryFiles = [path.join(__dirname, 'public', name), path.join(__dirname, name)];
