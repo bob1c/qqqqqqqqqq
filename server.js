@@ -31,7 +31,20 @@ const clean = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&#39;|&apos
  
 function upsert(it) {
   const old = items.get(it.id);
-  items.set(it.id, { ...(old || {}), ...it, firstSeen: old ? old.firstSeen : now() });
+  const t = now();
+  // Keep a short history of the score so we can measure how fast a post is growing.
+  const hist = ((old && old.hist) || []).concat([[t, it.score]]).slice(-40);
+  items.set(it.id, { ...(old || {}), ...it, hist, firstSeen: old ? old.firstSeen : t });
+}
+ 
+// Growth over the last ~30-90 minutes, based on what we observed ourselves.
+function growth(it) {
+  const t = now();
+  const past = (it.hist || []).filter(([ts]) => t - ts >= 25 * 60000 && t - ts <= 100 * 60000);
+  if (!past.length) return null;
+  const [ts, sc] = past[0];
+  const delta = it.score - sc;
+  return { delta, base: Math.max(sc, 1), perHour: delta / ((t - ts) / 3600000) };
 }
  
 /* ----------------------------- sources ----------------------------- */
@@ -40,11 +53,44 @@ function upsert(it) {
 const SUBS = (process.env.SUBREDDITS ||
   'memes,dankmemes,MemeEconomy,OutOfTheLoop,popular,technology,worldnews').split(',');
  
+// Reddit often blocks datacenter IPs on one host but not another, so try several routes per subreddit.
+async function redditSub(sub) {
+  const urls = [
+    `https://www.reddit.com/r/${sub}/rising.json?limit=25&raw_json=1`,
+    `https://old.reddit.com/r/${sub}/rising.json?limit=25&raw_json=1`,
+    `https://www.reddit.com/r/${sub}/hot.json?limit=25&raw_json=1`,
+  ];
+  let lastErr;
+  for (const u of urls) {
+    try { return (await getJSON(u)).data.children; } catch (e) { lastErr = e; }
+  }
+  // Last resort: RSS (no vote counts, so rank by position in the feed).
+  try {
+    const xml = await getText(`https://www.reddit.com/r/${sub}/hot.rss?limit=25`);
+    const out = [];
+    let n = 0;
+    for (const m of xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+      const b = m[1];
+      const link = (b.match(/<link href="([^"]+)"/) || [])[1];
+      const title = clean((b.match(/<title>([\s\S]*?)<\/title>/) || [])[1]);
+      const upd = (b.match(/<updated>([\s\S]*?)<\/updated>/) || [])[1];
+      const id = (b.match(/<id>t3_([a-z0-9]+)<\/id>/) || [])[1];
+      if (!link || !title) continue;
+      out.push({ data: { id: id || link, title, permalink: link.replace('https://www.reddit.com', ''), created_utc: Date.parse(upd) / 1000, score: Math.max(10, 500 - 20 * n), num_comments: 20, stickied: false, over_18: false } });
+      n++;
+    }
+    if (out.length) return out;
+  } catch (e) { lastErr = e; }
+  throw lastErr || new Error('reddit blocked');
+}
+ 
 async function srcReddit() {
   const out = [];
+  let fails = 0, lastErr;
   for (const sub of SUBS) {
-    const j = await getJSON(`https://www.reddit.com/r/${sub}/rising.json?limit=25&raw_json=1`);
-    for (const c of j.data.children) {
+    let children;
+    try { children = await redditSub(sub); } catch (e) { fails++; lastErr = e; continue; }
+    for (const c of children) {
       const d = c.data;
       if (d.stickied || d.over_18) continue;
       const img = d.post_hint === 'image' ? d.url : (d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : '');
@@ -54,6 +100,57 @@ async function srcReddit() {
         ts: d.created_utc * 1000, score: d.score, comments: d.num_comments,
       });
     }
+  }
+  if (!out.length && fails) throw lastErr;
+  return out;
+}
+ 
+const stripHtml = (s) => clean(String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<\/p>/gi, ' ').replace(/<[^>]+>/g, ''));
+ 
+// Mastodon: public trending posts and links, no key needed.
+async function srcMastodon() {
+  const host = process.env.MASTODON_HOST || 'mastodon.social';
+  const [posts, links] = await Promise.all([
+    getJSON(`https://${host}/api/v1/trends/statuses?limit=40`).catch(() => []),
+    getJSON(`https://${host}/api/v1/trends/links?limit=20`).catch(() => []),
+  ]);
+  if (!posts.length && !links.length) throw new Error('no data');
+  const out = [];
+  for (const p of posts) {
+    const text = stripHtml(p.content);
+    if (!text || p.sensitive) continue;
+    const media = (p.media_attachments || []).find((m) => m.preview_url);
+    out.push({
+      id: 'ma_' + p.id, source: 'mastodon', kind: 'meme', title: text.slice(0, 220), url: p.url,
+      image: media ? media.preview_url : '', author: '@' + (p.account && p.account.acct),
+      ts: Date.parse(p.created_at), score: (p.favourites_count || 0) + 2 * (p.reblogs_count || 0), comments: p.replies_count || 0,
+    });
+  }
+  for (const l of links) {
+    const uses = (l.history || []).slice(0, 2).reduce((a, h) => a + Number(h.uses || 0), 0);
+    out.push({
+      id: 'ml_' + l.url, source: 'mastodon', kind: 'news', title: clean(l.title), url: l.url, image: l.image || '',
+      author: l.provider_name || 'link', ts: Date.parse(l.published_at) || now(), score: uses * 20, comments: 0,
+    });
+  }
+  return out;
+}
+ 
+// Bluesky: the public "What's Hot" feed, no key needed.
+async function srcBluesky() {
+  const feed = encodeURIComponent('at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.generator/whats-hot');
+  const j = await getJSON(`https://public.api.bsky.app/xrpc/app.bsky.feed.getFeed?feed=${feed}&limit=50`);
+  const out = [];
+  for (const f of j.feed || []) {
+    const p = f.post;
+    const text = clean(p.record && p.record.text);
+    if (!text || (p.labels && p.labels.length)) continue;
+    const img = p.embed && p.embed.images && p.embed.images[0] ? p.embed.images[0].thumb : (p.embed && p.embed.thumbnail) || '';
+    out.push({
+      id: 'bs_' + p.uri, source: 'bluesky', kind: 'meme', title: text.slice(0, 220),
+      url: `https://bsky.app/profile/${p.author.handle}/post/${p.uri.split('/').pop()}`, image: img,
+      author: '@' + p.author.handle, ts: Date.parse(p.record.createdAt), score: (p.likeCount || 0) + 2 * (p.repostCount || 0), comments: p.replyCount || 0,
+    });
   }
   return out;
 }
@@ -170,6 +267,8 @@ const SOURCES = [
   { name: 'reddit', every: 60, run: srcReddit },
   { name: 'hackernews', every: 120, run: srcHN },
   { name: 'trends', every: 300, run: srcTrends },
+  { name: 'mastodon', every: 120, run: srcMastodon },
+  { name: 'bluesky', every: 90, run: srcBluesky },
   { name: 'x', every: 120, run: srcX },
   { name: 'tiktok', every: 600, run: srcTikTok },
 ];
@@ -250,10 +349,22 @@ function rescore() {
     it.tier = it.flags.length ? 'skip' : it.rank >= 68 ? 'hot' : it.rank >= 48 ? 'watch' : it.rank >= 30 ? 'meh' : 'junk';
     it.reasons = reasons;
     if (it.kind !== 'coin') it.ticker = suggestTicker(it);
-    // Already has a coin on Solana -> not an opportunity any more, move out of the main feed.
+    // Already has a coin on Solana -> mark it, but keep it visible.
     if (it.kind !== 'coin' && it.coin && (it.coin.verdict === 'taken' || it.coin.verdict === 'crowded')) it.tier = 'taken';
+ 
+    // "Rising" tab: a post that is visibly picking up speed. Once it qualifies it stays there.
+    const g = growth(it);
+    it.growth = g ? Math.round(g.perHour) : 0;
+    if (it.kind !== 'coin' && !it.flags.length && ageH(it.ts) <= 24 && !it.risingAt) {
+      let why = '';
+      if (g && g.delta >= 40 && g.delta >= 0.25 * g.base) why = 'резкий рост: +' + fmtN(g.delta) + ' за час';
+      else if (it._vel >= 0.9 && it.rank >= 55) why = 'в топе своей площадки';
+      else if (it.cross >= 1 && it.rank >= 50) why = 'на ' + (it.cross + 1) + ' площадках сразу';
+      if (why) { it.risingAt = now(); it.risingWhy = why; }
+    }
   }
 }
+const fmtN = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(Math.round(n)));
  
 /* --------------------- "is it already a coin?" --------------------- */
 async function coinCheck(ticker) {
@@ -278,7 +389,7 @@ async function coinCheck(ticker) {
  
 async function enrichTop() {
   // Check the best candidates (hot, watch, and already-flagged ones so they can come back if the coin dies).
-  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && i.ticker && !i.flags.length && (i.rank >= 40 || i.tier === 'taken')).sort((a, b) => b.rank - a.rank).slice(0, 30);
+  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && i.ticker && !i.flags.length && (i.risingAt || i.rank >= 55)).sort((a, b) => (b.risingAt || 0) - (a.risingAt || 0) || b.rank - a.rank).slice(0, 30);
   for (const it of cand) {
     const d = await coinCheck(it.ticker);
     if (d) it.coin = d;
@@ -291,9 +402,9 @@ function view() {
   return [...items.values()]
     .filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin')
     .sort((a, b) => b.rank - a.rank)
-    .slice(0, 300)
-    .map(({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra }) =>
-      ({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra }));
+    .slice(0, 600)
+    .map(({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }) =>
+      ({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }));
 }
 function broadcast() {
   const msg = `event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`;
