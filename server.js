@@ -8,7 +8,7 @@ const path = require('path');
  
 const PORT = Number(process.env.PORT || 3000);
 const UA = 'Mozilla/5.0 (compatible; MemePulse/1.0)';
-const MAX_AGE_H = 36;
+const MAX_AGE_H = Number(process.env.MAX_AGE_HOURS || 24); // anything older never shows up
  
 const items = new Map();   // id -> item
 const status = {};         // source -> {ok, last, count, error}
@@ -30,6 +30,8 @@ const ageH = (ts) => Math.max(0, (now() - ts) / 3600000);
 const clean = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
  
 function upsert(it) {
+  // Never store things that are already too old to catch a wave.
+  if (it.kind !== 'coin' && ageH(it.ts) > MAX_AGE_H) return;
   const old = items.get(it.id);
   const t = now();
   // Keep a short history of the score so we can measure how fast a post is growing.
@@ -47,11 +49,33 @@ function growth(it) {
   return { delta, base: Math.max(sc, 1), perHour: delta / ((t - ts) / 3600000) };
 }
  
+ 
+// Old news dressed up as new: a recent post that links to a months-old article, "(2019)" in the title, "TIL", "5 years ago"...
+function staleReason(it) {
+  const y = new Date().getUTCFullYear();
+  const title = it.title || '';
+  const link = it.link || it.url || '';
+  const m = link.match(/[\/-](20\d{2})[\/-](0?[1-9]|1[0-2])(?:[\/-](0?[1-9]|[12]\d|3[01]))?(?=[\/-]|$|\?)/);
+  if (m) {
+    const yy = +m[1], mm = +m[2], dd = m[3] ? +m[3] : new Date(Date.UTC(yy, mm, 0)).getUTCDate(); // month only -> last day of month
+    const d = Date.UTC(yy, mm - 1, dd);
+    if (d < now() - 7 * 86400000 && d > Date.UTC(2000, 0, 1)) return 'ссылка на материал от ' + String(dd).padStart(2, '0') + '.' + String(mm).padStart(2, '0') + '.' + yy;
+  }
+  const py = title.match(/\((19|20)(\d{2})\)/);
+  if (py && +(py[1] + py[2]) <= y - 1) return 'в заголовке год ' + py[1] + py[2];
+  const iy = title.match(/\b(?:in|of|since|from|back in|during)\s+((?:19|20)\d{2})\b/i);
+  if (iy && +iy[1] <= y - 1) return 'в заголовке год ' + iy[1];
+  if (/\b\d+\s+(years?|months?)\s+ago\b/i.test(title)) return 'речь о прошлом («… назад»)';
+  if (/^(TIL\b|today i learned)/i.test(title)) return 'TIL: исторический факт';
+  if (/\b(throwback|flashback|#tbt|remember when|rewatch(ing)? in)\b/i.test(title)) return 'ностальгия';
+  return '';
+}
+ 
 /* ----------------------------- sources ----------------------------- */
 // Each source returns an array of {id, source, kind, title, url, image, author, ts, score, comments, extra}
  
 const SUBS = (process.env.SUBREDDITS ||
-  'all,popular,memes,dankmemes,MemeEconomy,wholesomememes,me_irl,OutOfTheLoop,worldnews,news,technology,todayilearned,interestingasfuck,nextfuckinglevel,Cryptocurrency,solana').split(',');
+  'all,popular,memes,dankmemes,MemeEconomy,wholesomememes,me_irl,OutOfTheLoop,worldnews,news,technology,interestingasfuck,nextfuckinglevel,Cryptocurrency,solana').split(',');
 const MEME_SUBS = new Set(['memes', 'dankmemes', 'MemeEconomy', 'wholesomememes', 'me_irl', 'interestingasfuck', 'nextfuckinglevel']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  
@@ -99,7 +123,7 @@ async function srcReddit() {
       const img = d.post_hint === 'image' ? d.url : (d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : '');
       out.push({
         id: 'rd_' + d.id, source: 'reddit', kind: MEME_SUBS.has(sub) ? 'meme' : 'news',
-        title: clean(d.title), url: 'https://reddit.com' + d.permalink, image: img, author: 'r/' + sub,
+        title: clean(d.title), url: 'https://reddit.com' + d.permalink, link: d.url_overridden_by_dest || d.url || '', image: img, author: 'r/' + sub,
         ts: d.created_utc * 1000, score: d.score, comments: d.num_comments,
       });
     }
@@ -132,7 +156,7 @@ async function srcMastodon() {
   for (const l of links) {
     const uses = (l.history || []).slice(0, 2).reduce((a, h) => a + Number(h.uses || 0), 0);
     out.push({
-      id: 'ml_' + l.url, source: 'mastodon', kind: 'news', title: clean(l.title), url: l.url, image: l.image || '',
+      id: 'ml_' + l.url, source: 'mastodon', kind: 'news', title: clean(l.title), url: l.url, link: l.url, image: l.image || '',
       author: l.provider_name || 'link', ts: Date.parse(l.published_at) || now(), score: uses * 20, comments: 0,
     });
   }
@@ -167,7 +191,7 @@ async function srcHN() {
       if (!d || !d.title) return;
       out.push({
         id: 'hn_' + id, source: 'hackernews', kind: 'news', title: clean(d.title),
-        url: d.url || `https://news.ycombinator.com/item?id=${id}`, image: '', author: d.by,
+        url: d.url || `https://news.ycombinator.com/item?id=${id}`, link: d.url || '', image: '', author: d.by,
         ts: d.time * 1000, score: d.score, comments: d.descendants || 0,
       });
     } catch (_) { /* skip one item */ }
@@ -302,11 +326,12 @@ function parseFeed(xml, name, kind) {
     if (!link) link = plain(tag(b, 'guid'));
     const date = plain(tag(b, 'pubDate')) || plain(tag(b, 'published')) || plain(tag(b, 'updated')) || plain(tag(b, 'dc:date'));
     let ts = Date.parse(date);
-    if (!ts || ts > now() + 3600000) ts = now();
+    if (!ts) return;                       // no usable date: can't prove it's fresh, so skip it
+    if (ts > now() + 3600000) ts = now();
     const img = (b.match(/<media:(?:content|thumbnail)[^>]*url="([^"]+)"/i) || b.match(/<enclosure[^>]*url="([^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i) || b.match(/<img[^>]*src="([^"]+)"/i) || [])[1] || '';
     if (!title || !link) return;
     // RSS has no votes. Items higher in a feed are the outlet's own top stories, so use position as a weak score.
-    out.push({ id: 'rss_' + link, source: name, kind, title, url: link, image: img, author: name, ts, score: Math.max(5, 120 - pos * 4), comments: 0 });
+    out.push({ id: 'rss_' + link, source: name, kind, title, url: link, link, image: img, author: name, ts, score: Math.max(5, 120 - pos * 4), comments: 0 });
   });
   return out;
 }
@@ -332,6 +357,79 @@ async function srcWiki() {
   return out;
 }
  
+// Lemmy: open Reddit-like network with big meme communities. No key.
+const LEMMY = [
+  ['lemmy.world', 'memes', 'meme'], ['lemmy.world', 'lemmyshitpost', 'meme'], ['lemmy.world', 'comicstrips', 'meme'],
+  ['lemmy.world', 'news', 'news'], ['lemmy.world', 'worldnews', 'news'], ['lemmy.world', 'technology', 'news'],
+];
+async function lemmyPage(host, community) {
+  const q = `sort=Hot&limit=40&community_name=${community}`;
+  for (const v of ['v3', 'v4']) {
+    try { return (await getJSON(`https://${host}/api/${v}/post/list?${q}`)).posts; } catch (_) { /* try next API version */ }
+  }
+  throw new Error('no answer from ' + host);
+}
+async function srcLemmy() {
+  const out = []; let fails = 0, lastErr;
+  for (const [host, community, kind] of LEMMY) {
+    let posts;
+    try { posts = await lemmyPage(host, community); } catch (e) { fails++; lastErr = e; continue; }
+    for (const p of posts || []) {
+      const po = p.post, c = p.counts || {};
+      if (po.nsfw || (p.community && p.community.nsfw)) continue;
+      const ts = Date.parse(/Z|[+-]\d\d:?\d\d$/.test(po.published) ? po.published : po.published + 'Z');
+      out.push({ id: 'lm_' + po.ap_id, source: 'lemmy', kind, title: clean(po.name), url: po.ap_id, link: po.url || '', image: po.thumbnail_url || '',
+        author: community + '@' + host, ts, score: (c.score || 0) * 3, comments: c.comments || 0 });
+    }
+    await sleep(300);
+  }
+  if (!out.length && fails) throw lastErr;
+  return out;
+}
+ 
+// YouTube "most popular" (+ Comedy). Needs a FREE API key: console.cloud.google.com -> YouTube Data API v3. Costs 1 unit per call, 10 000 free per day.
+async function srcYouTube() {
+  const key = process.env.YOUTUBE_KEY;
+  if (!key) return null;
+  const region = process.env.YOUTUBE_REGION || 'US';
+  const out = [];
+  for (const [cat, kind] of [['', 'trend'], ['23', 'meme'], ['24', 'trend']]) {
+    const u = `https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&chart=mostPopular&regionCode=${region}&maxResults=40${cat ? '&videoCategoryId=' + cat : ''}&key=${key}`;
+    let j; try { j = await getJSON(u); } catch (e) { if (cat === '') throw e; continue; }
+    for (const v of j.items || []) {
+      const st = v.statistics || {};
+      out.push({ id: 'yt_' + v.id, source: 'youtube', kind, title: clean(v.snippet.title), url: 'https://www.youtube.com/watch?v=' + v.id, link: '',
+        image: (v.snippet.thumbnails.medium || v.snippet.thumbnails.default || {}).url || '', author: v.snippet.channelTitle,
+        ts: Date.parse(v.snippet.publishedAt), score: Number(st.viewCount || 0) / 200 + Number(st.likeCount || 0) / 10, comments: Number(st.commentCount || 0) });
+    }
+  }
+  return out;
+}
+ 
+// Telegram: public channels have a web preview (t.me/s/NAME), no key. Put channel names in TELEGRAM_CHANNELS="name1,name2".
+async function srcTelegram() {
+  const list = (process.env.TELEGRAM_CHANNELS || '').split(',').map((x) => x.trim().replace(/^@/, '')).filter(Boolean);
+  if (!list.length) return null;
+  const num = (t) => { const m = String(t || '').trim().match(/^([\d.]+)\s*([KM]?)/i); return m ? parseFloat(m[1]) * ({ K: 1e3, M: 1e6 }[m[2].toUpperCase()] || 1) : 0; };
+  const out = []; let fails = 0, lastErr;
+  for (const ch of list) {
+    let html;
+    try { html = await getText('https://t.me/s/' + ch); } catch (e) { fails++; lastErr = e; continue; }
+    for (const m of html.matchAll(/data-post="([^"]+)"[\s\S]*?(?=data-post="|$)/g)) {
+      const b = m[0];
+      const text = plain((b.match(/tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/) || [])[1] || '');
+      const dt = (b.match(/<time[^>]*datetime="([^"]+)"/) || [])[1];
+      if (text.length < 8 || !dt) continue;
+      const views = num((b.match(/tgme_widget_message_views[^>]*>([^<]+)</) || [])[1]);
+      const img = (b.match(/background-image:url\('([^']+)'\)/) || [])[1] || '';
+      out.push({ id: 'tg_' + m[1], source: 'telegram', kind: 'meme', title: text.slice(0, 220), url: 'https://t.me/' + m[1], link: '', image: img, author: '@' + ch, ts: Date.parse(dt), score: views / 20, comments: 0 });
+    }
+    await sleep(300);
+  }
+  if (!out.length && fails) throw lastErr;
+  return out;
+}
+ 
 const SOURCES = [
   { name: 'reddit', every: 90, run: srcReddit },
   { name: 'hackernews', every: 45, run: srcHN },
@@ -339,6 +437,9 @@ const SOURCES = [
   { name: 'mastodon', every: 60, run: srcMastodon },
   { name: 'bluesky', every: 30, run: srcBluesky },
   { name: 'wikipedia', every: 3600, run: srcWiki },
+  { name: 'lemmy', every: 90, run: srcLemmy },
+  { name: 'youtube', every: 600, run: srcYouTube },
+  { name: 'telegram', every: 60, run: srcTelegram },
   ...FEEDS.map(([name, url, kind]) => ({ name, every: 60, run: async () => parseFeed(await getText(url, { Accept: 'application/rss+xml, application/xml, text/xml, */*' }), name, kind) })),
   { name: 'x', every: 120, run: srcX },
   { name: 'tiktok', every: 600, run: srcTikTok },
@@ -417,6 +518,7 @@ function rescore() {
     if (it.title.length > 140) s -= 6;
     if (it.kind === 'coin') { s = 40 + it._vel * 45; reasons.length = 0; if (it._vel > 0.7) reasons.push('trading hot'); }
  
+    it.stale = it.kind === 'coin' ? '' : staleReason(it);
     it.flags = [];
     if (SPAM.test(it.title)) { s -= 60; it.flags.push('spam'); }
     if (SENSITIVE.test(it.title)) { s -= 60; it.flags.push('sensitive'); }
@@ -432,7 +534,7 @@ function rescore() {
     // "Rising" tab: a post that is visibly picking up speed. Once it qualifies it stays there.
     const g = growth(it);
     it.growth = g ? Math.round(g.perHour) : 0;
-    if (it.kind !== 'coin' && !it.flags.length && ageH(it.ts) <= 24 && !it.risingAt) {
+    if (it.kind !== 'coin' && !it.flags.length && !it.stale && ageH(it.ts) <= MAX_AGE_H && !it.risingAt) {
       let why = '';
       if (g && g.delta >= 40 && g.delta >= 0.25 * g.base) why = 'резкий рост: +' + fmtN(g.delta) + ' за час';
       else if (it._vel >= 0.9 && it.rank >= 55) why = 'в топе своей площадки';
@@ -466,7 +568,7 @@ async function coinCheck(ticker) {
  
 async function enrichTop() {
   // Check the best candidates (hot, watch, and already-flagged ones so they can come back if the coin dies).
-  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && i.ticker && !i.flags.length && (i.risingAt || i.rank >= 55)).sort((a, b) => (b.risingAt || 0) - (a.risingAt || 0) || b.rank - a.rank).slice(0, 30);
+  const cand = [...items.values()].filter((i) => i.kind !== 'coin' && i.ticker && !i.flags.length && !i.stale && (i.risingAt || i.rank >= 55)).sort((a, b) => (b.risingAt || 0) - (a.risingAt || 0) || b.rank - a.rank).slice(0, 30);
   for (const it of cand) {
     const d = await coinCheck(it.ticker);
     if (d) it.coin = d;
@@ -475,19 +577,23 @@ async function enrichTop() {
 }
  
 /* ----------------------------- loop & SSE ----------------------------- */
+let hiddenOld = 0;
 function view() {
-  return [...items.values()]
-    .filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin')
+  const all = [...items.values()].filter((i) => ageH(i.ts) <= MAX_AGE_H || i.kind === 'coin');
+  hiddenOld = all.filter((i) => i.stale).length;
+  return all
+    .filter((i) => !i.stale)
     .sort((a, b) => (b.risingAt ? 1 : 0) - (a.risingAt ? 1 : 0) || b.ts - a.ts)
     .slice(0, 800)
     .map(({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }) =>
       ({ id, source, kind, title, url, image, author, ts, score, comments, rank, tier, reasons, flags, ticker, coin, firstSeen, extra, risingAt, risingWhy, growth }));
 }
 let version = 1;
+function snapshot() { const items = view(); return { version, items, status, hidden: hiddenOld }; }
 function broadcast() {
   version++;
   if (!clients.size) return;
-  const msg = `event: snapshot\ndata: ${JSON.stringify({ version, items: view(), status })}\n\n`;
+  const msg = `event: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`;
   for (const c of clients) c.write(msg);
 }
  
@@ -537,7 +643,7 @@ function start() {
 const server = http.createServer((req, res) => {
   if (req.url === '/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    res.write(`event: snapshot\ndata: ${JSON.stringify({ version, items: view(), status })}\n\n`);
+    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`);
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);
     req.on('close', () => { clearInterval(ping); clients.delete(res); });
@@ -547,7 +653,7 @@ const server = http.createServer((req, res) => {
     const v = Number((new URL(req.url, 'http://x').searchParams.get('v')) || 0);
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     if (v === version) return res.end(JSON.stringify({ version, unchanged: true }));
-    return res.end(JSON.stringify({ version, items: view(), status }));
+    return res.end(JSON.stringify(snapshot()));
   }
   // Serve index.html from ./public or, if it was uploaded next to server.js, from the project root.
   const name = req.url.split('?')[0] === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
@@ -579,5 +685,6 @@ if (process.argv.includes('--selftest')) {
   process.exit(0);
 }
  
+server.listen(PORT, () => { console.log('MemePulse on http://localhost:' + PORT); start(); });
 server.listen(PORT, () => { console.log('MemePulse on http://localhost:' + PORT); start(); });
  
