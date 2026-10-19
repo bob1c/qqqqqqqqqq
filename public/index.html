@@ -74,7 +74,7 @@ h1 span{color:var(--hot)}
 <div class="wrap">
   <header>
     <h1>Meme<span>Pulse</span></h1>
-    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span> <span id="ver" style="opacity:.6">v5</span></div>
+    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span> <span id="ver" style="opacity:.6">v6</span></div>
   </header>
   <div class="sources" id="sources"></div>
  
@@ -104,7 +104,7 @@ h1 span{color:var(--hot)}
 <script>
 const $ = (s) => document.querySelector(s);
 const state = { items: [], seen: new Set(), tab: 'all', kind: '', sort: 'new', first: true };
-const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok', wikipedia: 'Wikipedia' };
+const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok', wikipedia: 'Wikipedia', lemmy: 'Lemmy', youtube: 'YouTube', telegram: 'Telegram' };
 const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip', taken: 'занято' };
 const VERDICT = { open: 'монеты нет', early: 'монет мало', crowded: 'много копий', taken: 'монета уже есть' };
  
@@ -153,7 +153,7 @@ function render() {
   } else {
     for (const it of list.slice(0, 300)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && (state.tab === 'rising' || it.risingAt)));
   }
-  $('#count').textContent = list.length + ' в ленте';
+  $('#count').textContent = list.length + ' в ленте' + (state.hidden ? ' · старых скрыто: ' + state.hidden : '');
   for (const i of state.items) state.seen.add(i.id);
   state.first = false;
 }
@@ -189,7 +189,7 @@ let lastUpdate = 0, version = 0;
 function apply(d) {
   if (d.unchanged) return;
   version = d.version;
-  state.items = d.items; renderStatus(d.status); render();
+  state.items = d.items; state.hidden = d.hidden || 0; renderStatus(d.status); render();
 }
 function tickLive() {
   // Runs every second: clock, and every "N сек назад" label on screen.
