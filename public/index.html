@@ -74,7 +74,7 @@ h1 span{color:var(--hot)}
 <div class="wrap">
   <header>
     <h1>Meme<span>Pulse</span></h1>
-    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span></div>
+    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span> <span id="ver" style="opacity:.6">v5</span></div>
   </header>
   <div class="sources" id="sources"></div>
  
@@ -104,13 +104,15 @@ h1 span{color:var(--hot)}
 <script>
 const $ = (s) => document.querySelector(s);
 const state = { items: [], seen: new Set(), tab: 'all', kind: '', sort: 'new', first: true };
-const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
+const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok', wikipedia: 'Wikipedia' };
 const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip', taken: 'занято' };
 const VERDICT = { open: 'монеты нет', early: 'монет мало', crowded: 'много копий', taken: 'монета уже есть' };
  
 function ago(ts) {
-  const m = Math.max(0, Math.round((Date.now() - ts) / 60000));
-  return m < 60 ? m + ' мин' : m < 1440 ? Math.round(m / 60) + ' ч' : Math.round(m / 1440) + ' д';
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (sec < 60) return sec + ' сек';
+  const m = Math.floor(sec / 60);
+  return m < 60 ? m + ' мин' : m < 1440 ? Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин' : Math.floor(m / 1440) + ' д';
 }
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -122,7 +124,7 @@ function card(it, isNew) {
   const flags = (it.flags || []).map((f) => `<span class="tag flag">${f === 'spam' ? 'спам' : 'чувствительная тема'}</span>`).join('');
   const rise = it.risingAt ? `<span class="tag rise">↑ набирает: ${esc(it.risingWhy || '')}</span>` : '';
   const reasons = (it.reasons || []).map((r) => `<span class="tag">${esc(r)}</span>`).join('');
-  const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), ago(it.ts) + ' назад']
+  const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), `<span class="ago" data-ts="${it.ts}">${ago(it.ts)}</span> назад`]
     .concat(it.kind === 'coin' && it.extra ? ['mcap ' + fmt(it.extra.mcap), '1h ' + (it.extra.change1h >= 0 ? '+' : '') + it.extra.change1h + '%'] : (it.score ? ['▲ ' + fmt(it.score)] : []))
     .concat(it.comments && it.kind !== 'coin' ? ['💬 ' + fmt(it.comments)] : []).join(' · ');
   li.innerHTML = `<div class="rank">${it.rank}<small>${TIER_LABEL[it.tier]}</small></div>
@@ -149,7 +151,7 @@ function render() {
       : 'Пока пусто. Ждём первые данные от источников.';
     feed.appendChild(li);
   } else {
-    for (const it of list.slice(0, 120)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && (state.tab === 'rising' || it.risingAt)));
+    for (const it of list.slice(0, 300)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && (state.tab === 'rising' || it.risingAt)));
   }
   $('#count').textContent = list.length + ' в ленте';
   for (const i of state.items) state.seen.add(i.id);
@@ -157,16 +159,20 @@ function render() {
 }
  
 function renderStatus(st) {
-  $('#sources').innerHTML = Object.entries(st).map(([k, v]) => {
+  const ent = Object.entries(st);
+  const okN = ent.filter(([, v]) => v.ok).length, onN = ent.filter(([, v]) => !v.off).length;
+  const chips = ent.sort((a, b) => (b[1].ok ? 1 : 0) - (a[1].ok ? 1 : 0)).map(([k, v]) => {
     const cls = v.off ? 'off' : v.ok ? 'ok' : 'err';
     const tip = v.off ? 'не подключён (нужен ключ)' : v.ok ? v.count + ' шт.' : v.error;
-    return `<span class="src ${cls}" title="${esc(tip)}">${SRC_NAME[k] || k}</span>`;
+    return `<span class="src ${cls}" title="${esc(tip)}">${esc(SRC_NAME[k] || k)}</span>`;
   }).join('');
+  $('#sources').innerHTML = `<span class="src ok" style="font-weight:600">Источников работает: ${okN} из ${onN}</span>` + chips;
 }
  
-document.querySelectorAll('[data-tier]').forEach((b) => b.addEventListener('click', () => {
-  const t = b.dataset.tier; state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
-  b.setAttribute('aria-pressed', state.tiers.has(t)); render();
+document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
+  state.tab = b.dataset.tab;
+  document.querySelectorAll('[data-tab]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  render();
 }));
 document.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => {
   state.sort = b.dataset.sort;
@@ -179,242 +185,43 @@ document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('clic
   render();
 }));
  
+let lastUpdate = 0, version = 0;
 function apply(d) {
+  if (d.unchanged) return;
+  version = d.version;
   state.items = d.items; renderStatus(d.status); render();
-  $('#live').classList.add('on'); $('#liveTxt').textContent = 'обновлено ' + new Date().toLocaleTimeString();
 }
-// Reliable path: plain polling every 20 s (works through any proxy).
+function tickLive() {
+  // Runs every second: clock, and every "N сек назад" label on screen.
+  const live = $('#live');
+  if (lastUpdate) {
+    const lag = Math.round((Date.now() - lastUpdate) / 1000);
+    live.classList.toggle('on', lag < 10);
+    $('#liveTxt').textContent = lag < 10 ? 'live · ' + new Date().toLocaleTimeString() : 'нет связи ' + lag + ' сек';
+  }
+  document.querySelectorAll('.ago').forEach((el) => { el.textContent = ago(Number(el.dataset.ts)); });
+}
+// Reliable path: ask the server once a second. If nothing changed it answers with a few bytes.
 async function poll() {
   try {
-    const r = await fetch('/api/items?t=' + Date.now(), { cache: 'no-store' });
+    const r = await fetch('/api/items?v=' + version + '&t=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status);
     apply(await r.json());
-  } catch (e) {
-    $('#live').classList.remove('on'); $('#liveTxt').textContent = 'нет связи, пробую снова…';
-  }
+    lastUpdate = Date.now();
+  } catch (e) { /* tickLive shows the connection problem */ }
+  setTimeout(poll, 1000);
 }
 // Fast path: server push. Some hosts buffer it, so polling above always runs too.
 function connect() {
   try {
     const es = new EventSource('/events');
-    es.addEventListener('snapshot', (e) => apply(JSON.parse(e.data)));
+    es.addEventListener('snapshot', (e) => { apply(JSON.parse(e.data)); lastUpdate = Date.now(); });
   } catch (e) { /* polling covers it */ }
 }
 poll();
-setInterval(poll, 20000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+setInterval(tickLive, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickLive(); });
 connect();
-setInterval(() => { if (state.items.length) render(); }, 60000);
-</script>
-</body>
-</html>
- <!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MemePulse</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=JetBrains+Mono:wght@400;600&family=Onest:wght@400;500;600&display=swap">
-<style>
-/* Layout: wire-service feed. Sticky status strip on top, filter bar, then a single column of ranked items. */
-:root{
-  --bg:#eef0f2; --panel:#fafbfc; --ink:#14202b; --mute:#5d6b78; --line:#d5dbe0;
-  --hot:#e5421f; --watch:#c58a00; --meh:#6b7a88; --ok:#17835a; --bad:#b3261e;
-  --f-display:"Bricolage Grotesque","Segoe UI",system-ui,sans-serif;
-  --f-body:"Onest","Segoe UI",system-ui,sans-serif;
-  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
-}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#0f161d; --panel:#16202a; --ink:#e6edf3; --mute:#8d9cab; --line:#26333f;
-  --hot:#ff6a45; --watch:#e3ad2c; --meh:#8d9cab; --ok:#3fc68f; --bad:#ff7b72; color-scheme:dark}}
-:root[data-theme="dark"]{
-  --bg:#0f161d; --panel:#16202a; --ink:#e6edf3; --mute:#8d9cab; --line:#26333f;
-  --hot:#ff6a45; --watch:#e3ad2c; --meh:#8d9cab; --ok:#3fc68f; --bad:#ff7b72; color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--f-body);
-  padding-block:0 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
-.wrap{max-width:860px;margin:0 auto}
-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:22px 0 10px}
-h1{font:800 28px/1 var(--f-display);margin:0;letter-spacing:-.02em}
-h1 span{color:var(--hot)}
-.live{font:600 12px var(--f-mono);color:var(--mute);display:flex;align-items:center;gap:8px}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--meh)}
-.live.on .dot{background:var(--ok);animation:pulse 1.6s infinite}
-@keyframes pulse{50%{opacity:.35}}
-.sources{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 14px}
-.src{font:400 11.5px var(--f-mono);padding:3px 8px;border:1px solid var(--line);border-radius:4px;color:var(--mute);background:var(--panel)}
-.src.ok{color:var(--ink)} .src.ok::before{content:"● ";color:var(--ok)}
-.src.err::before{content:"● ";color:var(--bad)} .src.off{opacity:.55}.src.off::before{content:"○ "}
-.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-block:1px solid var(--line);margin-bottom:14px;position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);z-index:5}
-.chip{font:600 12.5px var(--f-body);border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 11px;border-radius:999px;cursor:pointer}
-.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
-.chip:focus-visible,a:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
-.sp{flex:1}
-.tab{font:800 15px var(--f-display);border:0;border-bottom:3px solid transparent;background:none;color:var(--mute);padding:6px 4px;margin-right:12px;cursor:pointer}
-.tab span{font:600 11px var(--f-mono);margin-left:4px}
-.tab[aria-pressed="true"]{color:var(--ink);border-bottom-color:var(--hot)}
-.tab:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
-.tag.rise{background:color-mix(in srgb,var(--hot) 16%,transparent);color:var(--hot)}
-.count{font:400 12px var(--f-mono);color:var(--mute)}
-.feed{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
-.card{display:grid;grid-template-columns:58px minmax(0,1fr) auto;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px}
-.card.new{animation:flash 2.4s ease-out}
-@keyframes flash{0%{box-shadow:0 0 0 2px var(--hot);transform:translateY(-6px)}100%{box-shadow:0 0 0 0 transparent}}
-.rank{font:800 26px/1 var(--f-display);text-align:center;padding-top:2px}
-.rank small{display:block;font:600 10px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;margin-top:6px}
-.t-hot .rank{color:var(--hot)} .t-watch .rank{color:var(--watch)} .t-meh .rank,.t-junk .rank,.t-taken .rank{color:var(--meh)} .t-skip .rank{color:var(--bad)}
-.main{min-width:0}
-.title{font:600 15.5px/1.35 var(--f-body);color:var(--ink);text-decoration:none;overflow-wrap:anywhere}
-.title:hover{text-decoration:underline}
-.meta{display:flex;flex-wrap:wrap;gap:4px 10px;font:400 11.5px var(--f-mono);color:var(--mute);margin-top:5px}
-.tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
-.tag{font:600 11px var(--f-body);padding:2px 7px;border-radius:4px;background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink)}
-.tag.coin-open{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
-.tag.coin-taken{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
-.tag.coin-early,.tag.coin-crowded{background:color-mix(in srgb,var(--watch) 20%,transparent);color:var(--watch)}
-.tag.flag{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
-.thumb{width:72px;height:72px;object-fit:cover;border-radius:4px;background:var(--line)}
-.empty{padding:40px 0;text-align:center;color:var(--mute)}
-.note{font-size:12.5px;color:var(--mute);margin-top:22px;line-height:1.55}
-@media (max-width:520px){.card{grid-template-columns:48px minmax(0,1fr)}.thumb{display:none}.rank{font-size:22px}}
-@media (prefers-reduced-motion:reduce){.card.new,.live.on .dot{animation:none}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <header>
-    <h1>Meme<span>Pulse</span></h1>
-    <div class="live" id="live"><span class="dot"></span><span id="liveTxt">подключение…</span></div>
-  </header>
-  <div class="sources" id="sources"></div>
- 
-  <div class="bar" role="toolbar" aria-label="Фильтры">
-    <button class="tab" data-tab="all" aria-pressed="true">Все <span id="nAll"></span></button>
-    <button class="tab" data-tab="rising" aria-pressed="false">Набирают <span id="nRise"></span></button>
-    <span class="sp"></span>
-    <button class="chip" data-sort="new" aria-pressed="true">Сначала новые</button>
-    <button class="chip" data-sort="best" aria-pressed="false">Сначала лучшие</button>
-    <button class="chip" data-kind="" aria-pressed="true" id="kAll">Всё</button>
-    <button class="chip" data-kind="meme" aria-pressed="false">Мемы</button>
-    <button class="chip" data-kind="news" aria-pressed="false">Новости</button>
-    <button class="chip" data-kind="trend" aria-pressed="false">Тренды</button>
-    <span class="count" id="count"></span>
-  </div>
- 
-  <ul class="feed" id="feed"></ul>
- 
-  <p class="note">
-    «Все»: всё, что приходит из источников, свежее сверху. «Набирают»: посты, у которых за последний час резко выросли лайки и
-    комментарии, которые в топе своей площадки или появились сразу на нескольких. Попав во вкладку, пост там остаётся.
-    Спам и тяжёлые темы помечены. Метка тикера показывает, есть ли в Solana монета с таким названием (тикер сайт придумывает сам,
-    поэтому перед запуском проверьте мем вручную на DexScreener). Это радар внимания, а не финансовая рекомендация.
-  </p>
-</div>
- 
-<script>
-const $ = (s) => document.querySelector(s);
-const state = { items: [], seen: new Set(), tab: 'all', kind: '', sort: 'new', first: true };
-const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
-const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip', taken: 'занято' };
-const VERDICT = { open: 'монеты нет', early: 'монет мало', crowded: 'много копий', taken: 'монета уже есть' };
- 
-function ago(ts) {
-  const m = Math.max(0, Math.round((Date.now() - ts) / 60000));
-  return m < 60 ? m + ' мин' : m < 1440 ? Math.round(m / 60) + ' ч' : Math.round(m / 1440) + ' д';
-}
-const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n));
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
- 
-function card(it, isNew) {
-  const li = document.createElement('li');
-  li.className = 'card t-' + it.tier + (isNew ? ' new' : '');
-  const coin = it.coin ? `<span class="tag coin-${it.coin.verdict}">$${esc(it.ticker)}: ${VERDICT[it.coin.verdict] || it.coin.verdict}${it.coin.topMcap ? ' · ' + fmt(it.coin.topMcap) + ' mcap' : ''}</span>` : '';
-  const flags = (it.flags || []).map((f) => `<span class="tag flag">${f === 'spam' ? 'спам' : 'чувствительная тема'}</span>`).join('');
-  const rise = it.risingAt ? `<span class="tag rise">↑ набирает: ${esc(it.risingWhy || '')}</span>` : '';
-  const reasons = (it.reasons || []).map((r) => `<span class="tag">${esc(r)}</span>`).join('');
-  const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), ago(it.ts) + ' назад']
-    .concat(it.kind === 'coin' && it.extra ? ['mcap ' + fmt(it.extra.mcap), '1h ' + (it.extra.change1h >= 0 ? '+' : '') + it.extra.change1h + '%'] : (it.score ? ['▲ ' + fmt(it.score)] : []))
-    .concat(it.comments && it.kind !== 'coin' ? ['💬 ' + fmt(it.comments)] : []).join(' · ');
-  li.innerHTML = `<div class="rank">${it.rank}<small>${TIER_LABEL[it.tier]}</small></div>
-    <div class="main"><a class="title" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.title)}</a>
-    <div class="meta">${meta}</div><div class="tags">${rise}${coin}${reasons}${flags}</div></div>
-    ${it.image ? `<img class="thumb" loading="lazy" alt="" src="${esc(it.image)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}`;
-  return li;
-}
- 
-function render() {
-  const feed = $('#feed');
-  const base = state.items.filter((i) => i.kind !== 'coin' && (!state.kind || i.kind === state.kind));
-  const rising = base.filter((i) => i.risingAt);
-  $('#nAll').textContent = base.length; $('#nRise').textContent = rising.length;
-  const list = state.tab === 'rising' ? rising : base.slice();
-  const t = (i) => state.tab === 'rising' ? i.risingAt : i.ts;
-  list.sort(state.sort === 'new' ? (a, b) => t(b) - t(a) : (a, b) => b.rank - a.rank);
-  feed.replaceChildren();
-  if (!list.length) {
-    const li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = state.tab === 'rising'
-      ? 'Пока ничего не набирает. Сервер сравнивает рост постов каждые несколько минут, первые попадания появятся через полчаса-час после запуска.'
-      : 'Пока пусто. Ждём первые данные от источников.';
-    feed.appendChild(li);
-  } else {
-    for (const it of list.slice(0, 120)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && (state.tab === 'rising' || it.risingAt)));
-  }
-  $('#count').textContent = list.length + ' в ленте';
-  for (const i of state.items) state.seen.add(i.id);
-  state.first = false;
-}
- 
-function renderStatus(st) {
-  $('#sources').innerHTML = Object.entries(st).map(([k, v]) => {
-    const cls = v.off ? 'off' : v.ok ? 'ok' : 'err';
-    const tip = v.off ? 'не подключён (нужен ключ)' : v.ok ? v.count + ' шт.' : v.error;
-    return `<span class="src ${cls}" title="${esc(tip)}">${SRC_NAME[k] || k}</span>`;
-  }).join('');
-}
- 
-document.querySelectorAll('[data-tier]').forEach((b) => b.addEventListener('click', () => {
-  const t = b.dataset.tier; state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
-  b.setAttribute('aria-pressed', state.tiers.has(t)); render();
-}));
-document.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => {
-  state.sort = b.dataset.sort;
-  document.querySelectorAll('[data-sort]').forEach((x) => x.setAttribute('aria-pressed', x === b));
-  render();
-}));
-document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('click', () => {
-  state.kind = b.dataset.kind;
-  document.querySelectorAll('[data-kind]').forEach((x) => x.setAttribute('aria-pressed', x === b));
-  render();
-}));
- 
-function apply(d) {
-  state.items = d.items; renderStatus(d.status); render();
-  $('#live').classList.add('on'); $('#liveTxt').textContent = 'обновлено ' + new Date().toLocaleTimeString();
-}
-// Reliable path: plain polling every 20 s (works through any proxy).
-async function poll() {
-  try {
-    const r = await fetch('/api/items?t=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) throw new Error(r.status);
-    apply(await r.json());
-  } catch (e) {
-    $('#live').classList.remove('on'); $('#liveTxt').textContent = 'нет связи, пробую снова…';
-  }
-}
-// Fast path: server push. Some hosts buffer it, so polling above always runs too.
-function connect() {
-  try {
-    const es = new EventSource('/events');
-    es.addEventListener('snapshot', (e) => apply(JSON.parse(e.data)));
-  } catch (e) { /* polling covers it */ }
-}
-poll();
-setInterval(poll, 20000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
-connect();
-setInterval(() => { if (state.items.length) render(); }, 60000);
 </script>
 </body>
 </html>
