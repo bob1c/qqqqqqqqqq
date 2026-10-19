@@ -40,6 +40,11 @@ h1 span{color:var(--hot)}
 .chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .chip:focus-visible,a:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
 .sp{flex:1}
+.tab{font:800 15px var(--f-display);border:0;border-bottom:3px solid transparent;background:none;color:var(--mute);padding:6px 4px;margin-right:12px;cursor:pointer}
+.tab span{font:600 11px var(--f-mono);margin-left:4px}
+.tab[aria-pressed="true"]{color:var(--ink);border-bottom-color:var(--hot)}
+.tab:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+.tag.rise{background:color-mix(in srgb,var(--hot) 16%,transparent);color:var(--hot)}
 .count{font:400 12px var(--f-mono);color:var(--mute)}
 .feed{display:flex;flex-direction:column;gap:10px;margin:0;padding:0;list-style:none}
 .card{display:grid;grid-template-columns:58px minmax(0,1fr) auto;gap:12px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px}
@@ -74,12 +79,11 @@ h1 span{color:var(--hot)}
   <div class="sources" id="sources"></div>
  
   <div class="bar" role="toolbar" aria-label="Фильтры">
-    <button class="chip" data-tier="hot" aria-pressed="true">Hot</button>
-    <button class="chip" data-tier="watch" aria-pressed="true">Watch</button>
-    <button class="chip" data-tier="meh" aria-pressed="false">Meh</button>
-    <button class="chip" data-tier="junk" aria-pressed="false">Мусор</button>
-    <button class="chip" data-tier="taken" aria-pressed="false">Монета уже есть</button>
+    <button class="tab" data-tab="all" aria-pressed="true">Все <span id="nAll"></span></button>
+    <button class="tab" data-tab="rising" aria-pressed="false">Набирают <span id="nRise"></span></button>
     <span class="sp"></span>
+    <button class="chip" data-sort="new" aria-pressed="true">Сначала новые</button>
+    <button class="chip" data-sort="best" aria-pressed="false">Сначала лучшие</button>
     <button class="chip" data-kind="" aria-pressed="true" id="kAll">Всё</button>
     <button class="chip" data-kind="meme" aria-pressed="false">Мемы</button>
     <button class="chip" data-kind="news" aria-pressed="false">Новости</button>
@@ -90,18 +94,17 @@ h1 span{color:var(--hot)}
   <ul class="feed" id="feed"></ul>
  
   <p class="note">
-    Оценка 0–100: скорость роста относительно своей площадки, «мемность» (животные, сленг, персонажи), новостной повод,
-    упоминание на нескольких платформах, свежесть. Спам и трагедии помечаются и скрыты. Для лучших постов проверяется, есть ли уже
-    токен с таким тикером в Solana. Если монета уже есть, пост уходит из ленты во вкладку «Монета уже есть». Тикер сайт
-    придумывает сам, поэтому у мема может быть монета под другим названием: перед запуском проверьте вручную на DexScreener.
-    Это радар внимания, а не финансовая рекомендация: большинство мем-монет теряют стоимость.
+    «Все»: всё, что приходит из источников, свежее сверху. «Набирают»: посты, у которых за последний час резко выросли лайки и
+    комментарии, которые в топе своей площадки или появились сразу на нескольких. Попав во вкладку, пост там остаётся.
+    Спам и тяжёлые темы помечены. Метка тикера показывает, есть ли в Solana монета с таким названием (тикер сайт придумывает сам,
+    поэтому перед запуском проверьте мем вручную на DexScreener). Это радар внимания, а не финансовая рекомендация.
   </p>
 </div>
  
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { items: [], seen: new Set(), tiers: new Set(['hot', 'watch']), kind: '', first: true };
-const SRC_NAME = { reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
+const state = { items: [], seen: new Set(), tab: 'all', kind: '', sort: 'new', first: true };
+const SRC_NAME = { mastodon: 'Mastodon', bluesky: 'Bluesky', reddit: 'Reddit', hackernews: 'Hacker News', trends: 'Google Trends', pumpfun: 'pump.fun', dexscreener: 'DexScreener', x: 'X', tiktok: 'TikTok' };
 const TIER_LABEL = { hot: 'hot', watch: 'watch', meh: 'meh', junk: 'junk', skip: 'skip', taken: 'занято' };
 const VERDICT = { open: 'монеты нет', early: 'монет мало', crowded: 'много копий', taken: 'монета уже есть' };
  
@@ -117,26 +120,36 @@ function card(it, isNew) {
   li.className = 'card t-' + it.tier + (isNew ? ' new' : '');
   const coin = it.coin ? `<span class="tag coin-${it.coin.verdict}">$${esc(it.ticker)}: ${VERDICT[it.coin.verdict] || it.coin.verdict}${it.coin.topMcap ? ' · ' + fmt(it.coin.topMcap) + ' mcap' : ''}</span>` : '';
   const flags = (it.flags || []).map((f) => `<span class="tag flag">${f === 'spam' ? 'спам' : 'чувствительная тема'}</span>`).join('');
+  const rise = it.risingAt ? `<span class="tag rise">↑ набирает: ${esc(it.risingWhy || '')}</span>` : '';
   const reasons = (it.reasons || []).map((r) => `<span class="tag">${esc(r)}</span>`).join('');
   const meta = [SRC_NAME[it.source] || it.source, esc(it.author || ''), ago(it.ts) + ' назад']
     .concat(it.kind === 'coin' && it.extra ? ['mcap ' + fmt(it.extra.mcap), '1h ' + (it.extra.change1h >= 0 ? '+' : '') + it.extra.change1h + '%'] : (it.score ? ['▲ ' + fmt(it.score)] : []))
     .concat(it.comments && it.kind !== 'coin' ? ['💬 ' + fmt(it.comments)] : []).join(' · ');
   li.innerHTML = `<div class="rank">${it.rank}<small>${TIER_LABEL[it.tier]}</small></div>
     <div class="main"><a class="title" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.title)}</a>
-    <div class="meta">${meta}</div><div class="tags">${coin}${reasons}${flags}</div></div>
+    <div class="meta">${meta}</div><div class="tags">${rise}${coin}${reasons}${flags}</div></div>
     ${it.image ? `<img class="thumb" loading="lazy" alt="" src="${esc(it.image)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}`;
   return li;
 }
  
 function render() {
   const feed = $('#feed');
-  // Main feed: only memes/news/trends. Coins that already trade live on their own tab.
-  const list = state.items.filter((i) => state.kind === 'coin' ? i.kind === 'coin' : (state.tiers.has(i.tier) && i.kind !== 'coin' && (!state.kind || i.kind === state.kind)));
+  const base = state.items.filter((i) => i.kind !== 'coin' && (!state.kind || i.kind === state.kind));
+  const rising = base.filter((i) => i.risingAt);
+  $('#nAll').textContent = base.length; $('#nRise').textContent = rising.length;
+  const list = state.tab === 'rising' ? rising : base.slice();
+  const t = (i) => state.tab === 'rising' ? i.risingAt : i.ts;
+  list.sort(state.sort === 'new' ? (a, b) => t(b) - t(a) : (a, b) => b.rank - a.rank);
   feed.replaceChildren();
   if (!list.length) {
-    feed.innerHTML = '<li class="empty">Пока ничего подходящего. Ждём новые данные или включите «Meh».</li>';
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = state.tab === 'rising'
+      ? 'Пока ничего не набирает. Сервер сравнивает рост постов каждые несколько минут, первые попадания появятся через полчаса-час после запуска.'
+      : 'Пока пусто. Ждём первые данные от источников.';
+    feed.appendChild(li);
   } else {
-    for (const it of list.slice(0, 120)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && it.tier === 'hot'));
+    for (const it of list.slice(0, 120)) feed.appendChild(card(it, !state.first && !state.seen.has(it.id) && (state.tab === 'rising' || it.risingAt)));
   }
   $('#count').textContent = list.length + ' в ленте';
   for (const i of state.items) state.seen.add(i.id);
@@ -154,6 +167,11 @@ function renderStatus(st) {
 document.querySelectorAll('[data-tier]').forEach((b) => b.addEventListener('click', () => {
   const t = b.dataset.tier; state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
   b.setAttribute('aria-pressed', state.tiers.has(t)); render();
+}));
+document.querySelectorAll('[data-sort]').forEach((b) => b.addEventListener('click', () => {
+  state.sort = b.dataset.sort;
+  document.querySelectorAll('[data-sort]').forEach((x) => x.setAttribute('aria-pressed', x === b));
+  render();
 }));
 document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('click', () => {
   state.kind = b.dataset.kind;
@@ -175,3 +193,4 @@ setInterval(() => { if (state.items.length) render(); }, 60000);
 </script>
 </body>
 </html>
+ 
