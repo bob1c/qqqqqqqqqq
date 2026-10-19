@@ -438,14 +438,14 @@ function start() {
 /* ----------------------------- http ----------------------------- */
 const server = http.createServer((req, res) => {
   if (req.url === '/events') {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`event: snapshot\ndata: ${JSON.stringify({ items: view(), status })}\n\n`);
     clients.add(res);
     const ping = setInterval(() => res.write(': ping\n\n'), 25000);
     req.on('close', () => { clearInterval(ping); clients.delete(res); });
     return;
   }
-  if (req.url === '/api/items') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ items: view(), status })); }
+  if (req.url.split('?')[0] === '/api/items') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); return res.end(JSON.stringify({ items: view(), status })); }
   // Serve index.html from ./public or, if it was uploaded next to server.js, from the project root.
   const name = req.url.split('?')[0] === '/' ? 'index.html' : path.basename(req.url.split('?')[0]);
   const tryFiles = [path.join(__dirname, 'public', name), path.join(__dirname, name)];
